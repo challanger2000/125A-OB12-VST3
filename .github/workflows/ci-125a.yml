@@ -110,7 +110,6 @@ jobs:
           if errorlevel 1 exit /b 1
 
       - name: Validate original Program and Timbre bank MIDI encoding
-        if: contains(github.event.head_commit.message, '[bank-import]')
         shell: cmd
         run: |
           python tools\generate_bank_fixture.py build\OB12.vst3\Contents\x86_64-win\rom\presets build\bank-tests TT
@@ -118,7 +117,6 @@ jobs:
           python tools\generate_bank_fixture.py build\OB12.vst3\Contents\x86_64-win\rom\presets build\bank-tests VA2
           if errorlevel 1 exit /b 1
       - name: Validate direct Flash bank installation and original CPU note playback
-        if: contains(github.event.head_commit.message, '[bank-import]')
         timeout-minutes: 16
         shell: cmd
         run: |
