@@ -779,6 +779,11 @@ void Engine::select_preset(bool program, int bank, int slot) {
     midi(bytes, sizeof bytes);
 }
 
+void Engine::debug_lcd_report() const {
+    Impl& e = *impl;
+    std::lock_guard<std::mutex> running(e.run_lock);
+    e.m->lcd.report();
+}
 int Engine::selected_preset() const {
     return impl->selected_program.load(std::memory_order_relaxed);
 }

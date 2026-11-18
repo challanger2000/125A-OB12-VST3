@@ -22,7 +22,7 @@ int main(int argc,char** argv) {
     }
     const std::string romdir = argv[1];
     const std::string mode=argv[6];
-    if(mode!="program" && mode!="timbre" && mode!="pair") return 2;
+    if(mode!="program" && mode!="timbre" && mode!="pair" && mode!="reverse") return 2;
     std::vector<uint8_t> tmb,prg;
     const std::string tmb_error = Engine::read_sysex(std::wstring(argv[2],argv[2]+strlen(argv[2])),tmb);
     const std::string prg_error = Engine::read_sysex(std::wstring(argv[3],argv[3]+strlen(argv[3])),prg);
@@ -54,6 +54,7 @@ int main(int argc,char** argv) {
     // exact browser's current FIFO implementation rather than pretending that
     // independent stages have already been proven.
     if(mode=="pair") e.send_sysex_pair(tmb.data(),(int)tmb.size(),prg.data(),(int)prg.size(),10);
+    else if(mode=="reverse") e.send_sysex_pair(prg.data(),(int)prg.size(),tmb.data(),(int)tmb.size(),10);
     else if(mode=="program") e.send_sysex(prg.data(),(int)prg.size(),10);
     else e.send_sysex(tmb.data(),(int)tmb.size(),10);
     bool seen_pending=false;
@@ -65,6 +66,10 @@ int main(int argc,char** argv) {
         int waiting=e.sysex_waiting();
         long writes=e.flash_writes();
         if(waiting>0) seen_pending=true;
+        if(simulated==39 || simulated==99) {
+            printf("LCD_DIAGNOSTIC simulated=%d\n",simulated+1);
+            e.debug_lcd_report();
+        }
         if(simulated%20==0) {
             printf("BANK_TEST_PROGRESS simulated=%d sec, queued=%d, flashes=%ld, ready=%d\n",
                 simulated+1,waiting,writes-baseline,e.sounding_ready());
@@ -102,8 +107,8 @@ int main(int argc,char** argv) {
     printf("TIMBRE_FIRMWARE_NORMALIZATION=%s\n", normalized ? "ONE_BYTE_ACCEPTED" : "NONE");
     const bool prg_ok=compare(expected_prg,0xD0000,"PROGRAM");
     long writes=e.flash_writes()-baseline;
-    const long min_writes = mode=="pair" ? 40000 : mode=="timbre" ? 21000 : 20000;
-    const bool regions_ok = (mode=="pair" && tmb_ok && prg_ok) ||
+    const long min_writes = mode=="pair" || mode=="reverse" ? 40000 : mode=="timbre" ? 21000 : 20000;
+    const bool regions_ok = ((mode=="pair" || mode=="reverse") && tmb_ok && prg_ok) ||
                             (mode=="program" && prg_ok) || (mode=="timbre" && tmb_ok);
     const bool success=seen_pending&&drained&&e.sounding_ready()&&
                        writes>=min_writes&&regions_ok;
