@@ -304,56 +304,8 @@ public:
     tresult PLUGIN_API initialize(FUnknown*) override { return kResultOk; }
     tresult PLUGIN_API terminate() override { return kResultOk; }
     tresult PLUGIN_API setComponentState(IBStream*) override { return kResultOk; }
-    tresult PLUGIN_API setState(IBStream* stream) override {
-        if (!stream) return kInvalidArgument;
-        ProjectStateHeader header{};
-        int32 read = 0;
-        tresult result = stream->read(&header, sizeof header, &read);
-        // Historical versions stored no component state at all.
-        if (read == 0) return kResultOk;
-        if (result != kResultOk || read != (int32)sizeof header ||
-            memcmp(header.magic, "125AOB12", 8) != 0 || header.version != 1 ||
-            header.length != flash_image_bytes) return kResultFalse;
-        std::vector<uint8_t> image(header.length);
-        read = 0;
-        result = stream->read(image.data(), (int32)image.size(), &read);
-        if (result != kResultOk || read != (int32)image.size() ||
-            project_checksum(image) != header.checksum) return kResultFalse;
-
-        std::lock_guard<std::mutex> hold(instrument_lock);
-        bool running = bool(instrument);
-        instrument.reset(); // stop the old feeder before changing its machine memory
-        project_flash = std::move(image);
-        if (running) {
-            std::unique_ptr<Instrument> fresh(new Instrument);
-            if (!fresh->start(&project_flash)) return kResultFalse;
-            instrument = std::move(fresh);
-        }
-        return kResultOk;
-    }
-    tresult PLUGIN_API getState(IBStream* stream) override {
-        if (!stream) return kInvalidArgument;
-        std::vector<uint8_t> image;
-        {
-            std::lock_guard<std::mutex> hold(instrument_lock);
-            if (instrument && instrument->engine) {
-                if (!instrument->engine->snapshot_flash(image)) return kResultFalse;
-                project_flash = image;
-            } else {
-                image = project_flash;
-            }
-        }
-        // No instance was started; legacy empty-state behaviour is valid.
-        if (image.empty()) return kResultOk;
-        if (image.size() != flash_image_bytes) return kResultFalse;
-        ProjectStateHeader header{};
-        memcpy(header.magic, "125AOB12", 8);
-        header.version = 1;
-        header.length = (uint32_t)image.size();
-        header.checksum = project_checksum(image);
-        return stream_write_exact(stream, &header, (int32)sizeof header) &&
-               stream_write_exact(stream, image.data(), (int32)image.size()) ? kResultOk : kResultFalse;
-    }
+    tresult PLUGIN_API setState(IBStream*) override { return kResultOk; }
+    tresult PLUGIN_API getState(IBStream*) override { return kResultOk; }
     int32 PLUGIN_API getParameterCount() override { return midi_params; }
     tresult PLUGIN_API getParameterInfo(int32 index, ParameterInfo& info) override {
         if (index < 0 || index >= midi_params) return kInvalidArgument;
@@ -430,8 +382,56 @@ public:
         if (state) ensure();  // a plug-in scan never activates, so it never boots the machine
         return kResultOk;
     }
-    tresult PLUGIN_API setState(IBStream*) override { return kResultOk; }
-    tresult PLUGIN_API getState(IBStream*) override { return kResultOk; }
+    tresult PLUGIN_API setState(IBStream* stream) override {
+        if (!stream) return kInvalidArgument;
+        ProjectStateHeader header{};
+        int32 read = 0;
+        tresult result = stream->read(&header, sizeof header, &read);
+        // Historical versions stored no component state at all.
+        if (read == 0) return kResultOk;
+        if (result != kResultOk || read != (int32)sizeof header ||
+            memcmp(header.magic, "125AOB12", 8) != 0 || header.version != 1 ||
+            header.length != flash_image_bytes) return kResultFalse;
+        std::vector<uint8_t> image(header.length);
+        read = 0;
+        result = stream->read(image.data(), (int32)image.size(), &read);
+        if (result != kResultOk || read != (int32)image.size() ||
+            project_checksum(image) != header.checksum) return kResultFalse;
+
+        std::lock_guard<std::mutex> hold(instrument_lock);
+        bool running = bool(instrument);
+        instrument.reset(); // stop the old feeder before changing its machine memory
+        project_flash = std::move(image);
+        if (running) {
+            std::unique_ptr<Instrument> fresh(new Instrument);
+            if (!fresh->start(&project_flash)) return kResultFalse;
+            instrument = std::move(fresh);
+        }
+        return kResultOk;
+    }
+    tresult PLUGIN_API getState(IBStream* stream) override {
+        if (!stream) return kInvalidArgument;
+        std::vector<uint8_t> image;
+        {
+            std::lock_guard<std::mutex> hold(instrument_lock);
+            if (instrument && instrument->engine) {
+                if (!instrument->engine->snapshot_flash(image)) return kResultFalse;
+                project_flash = image;
+            } else {
+                image = project_flash;
+            }
+        }
+        // No instance was started; legacy empty-state behaviour is valid.
+        if (image.empty()) return kResultOk;
+        if (image.size() != flash_image_bytes) return kResultFalse;
+        ProjectStateHeader header{};
+        memcpy(header.magic, "125AOB12", 8);
+        header.version = 1;
+        header.length = (uint32_t)image.size();
+        header.checksum = project_checksum(image);
+        return stream_write_exact(stream, &header, (int32)sizeof header) &&
+               stream_write_exact(stream, image.data(), (int32)image.size()) ? kResultOk : kResultFalse;
+    }
 
     tresult PLUGIN_API setBusArrangements(SpeakerArrangement*, int32 inputs, SpeakerArrangement* outputs, int32 count) override {
         return inputs == 0 && count == 1 && outputs[0] == SpeakerArr::kStereo ? kResultOk : kResultFalse;
