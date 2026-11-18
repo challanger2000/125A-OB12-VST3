@@ -56,7 +56,11 @@ std::string rom_folder() {
     here = here.substr(0, here.find_last_of("\\/"));
     std::string beside = here + "\\rom";
     if (GetFileAttributesA((beside + "\\12cpu152-CPU-v1.52-FINAL.bin").c_str()) != INVALID_FILE_ATTRIBUTES) return beside;
-    return "F:\\Claude\\OB-12\\rom";
+    std::string above = here + "\\..\\rom";
+    if (GetFileAttributesA((above + "\\12cpu152-CPU-v1.52-FINAL.bin").c_str()) != INVALID_FILE_ATTRIBUTES) return above;
+    // Return the bundle-relative location even when missing; Instrument::start reports failure.
+    // Never silently load the original author's machine-specific F: path.
+    return beside;
 }
 
 // The analog output channel of the main board (service manual, "OUTPUT STEREO CHANNEL" and "ANALOG
