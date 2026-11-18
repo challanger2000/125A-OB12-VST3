@@ -174,20 +174,26 @@ static bool test_scale(IComponent* component, MemoryState* saved) {
         int initial = list ? (int)SendMessageW(list, LB_GETCOUNT, 0, 0) : -1;
         int types = ty ? (int)SendMessageW(ty, CB_GETCOUNT, 0, 0) : -1;
         int banks = bk ? (int)SendMessageW(bk, CB_GETCOUNT, 0, 0) : -1;
-        int collections = library ? (int)SendMessageW(library, CB_GETCOUNT, 0, 0) : -1;
+        int collections = library ? (int)SendMessageW(library, LB_GETCOUNT, 0, 0) : -1;
         // An alternate complete bank is selected from the dropdown. It must
         // immediately change the real private flash and let notes be played:
         // no preview-only state and no Load Bank Pair button click.
+        // All library collections are visible without opening a dropdown.
+        // The list control's client height must show >= 7 rows at 17px.
+        RECT library_bounds{};
+        if (library) GetClientRect(library, &library_bounds);
+        const bool sidebar_visible = library && IsWindowVisible(library) &&
+             library_bounds.bottom - library_bounds.top >= 7 * 17;
         bool library_switch_ok = false;
         int alternate = -1;
         for (int row = 1; library && row < collections; ++row) {
             wchar_t name[512] = {};
-            SendMessageW(library, CB_GETLBTEXT, row, (LPARAM)name);
+            SendMessageW(library, LB_GETTEXT, row, (LPARAM)name);
             if (wcsncmp(name, L"UI ", 3) == 0) { alternate = row; break; }
         }
         if (alternate >= 1 && list) {
-            SendMessageW(library, CB_SETCURSEL, alternate, 0);
-            SendMessageW(browser, WM_COMMAND, MAKEWPARAM(3110, CBN_SELCHANGE),
+            SendMessageW(library, LB_SETCURSEL, alternate, 0);
+            SendMessageW(browser, WM_COMMAND, MAKEWPARAM(3110, LBN_SELCHANGE),
                          (LPARAM)library);
             wchar_t in_other_bank[256] = {};
             SendMessageW(list, LB_GETTEXT, 0, (LPARAM)in_other_bank);
@@ -199,8 +205,8 @@ static bool test_scale(IComponent* component, MemoryState* saved) {
             const bool selectable = IsWindowEnabled(list) &&
                 wcsstr(in_other_bank, L"UI Browser") != nullptr &&
                 SendMessageW(list, LB_GETCOUNT, 0, 0) == 128;
-            SendMessageW(library, CB_SETCURSEL, 0, 0);
-            SendMessageW(browser, WM_COMMAND, MAKEWPARAM(3110, CBN_SELCHANGE),
+            SendMessageW(library, LB_SETCURSEL, 0, 0);
+            SendMessageW(browser, WM_COMMAND, MAKEWPARAM(3110, LBN_SELCHANGE),
                          (LPARAM)library);
             wchar_t restored_label[256] = {};
             SendMessageW(list, LB_GETTEXT, 0, (LPARAM)restored_label);
@@ -208,7 +214,7 @@ static bool test_scale(IComponent* component, MemoryState* saved) {
             const bool restore_data = component->getState(&restored_state) == kResultOk &&
                 restored_state.storage.size() == 0x100000 + 24 &&
                 memcmp(restored_state.storage.data() + 24 + 0xD0000, "OB Fat Pad", 10) == 0;
-            library_switch_ok = flash_changed && selectable && restore_data &&
+            library_switch_ok = sidebar_visible && flash_changed && selectable && restore_data &&
                                 wcsstr(restored_label, L"OB Fat Pad") != nullptr;
             printf("LIBRARY_SWITCH_TEST=%s direct_playable=%d flash_changed=%d project_restore=%d\n",
                    library_switch_ok?"PASS":"FAIL",selectable,flash_changed,restore_data);
