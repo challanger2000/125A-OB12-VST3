@@ -523,11 +523,9 @@ private:
             return;
         }
         std::wstring program_file, timbre_file;
-        int chosen_pair = library_ ? (int)SendMessageW(library_, CB_GETCURSEL, 0, 0) - 1 : -1;
-        if (chosen_pair >= 0 && chosen_pair < (int)bank_pairs_.size()) {
-            program_file = bank_pairs_[chosen_pair].program_path;
-            timbre_file = bank_pairs_[chosen_pair].timbre_path;
-        } else {
+        // This button is for adding a *new external file*, not for making the
+        // currently selected library playable. Library selection already does that.
+        {
             wchar_t path[32768] = {};
             OPENFILENAMEW dlg = {sizeof dlg};
             dlg.hwndOwner = window_;
@@ -539,13 +537,13 @@ private:
             std::wstring chosen(path);
             std::wstring filename = chosen.substr(chosen.find_last_of(L"\\/") + 1);
             std::wstring file_lower = lower(filename);
-            bool is_program = file_lower.size() == 11 && file_lower.substr(0, 5) == L"12prg" &&
-                              file_lower.substr(7) == L".mid";
-            bool is_timbre = file_lower.size() == 11 && file_lower.substr(0, 5) == L"12tmb" &&
-                             file_lower.substr(7) == L".mid";
+            const bool valid_suffix = file_lower.size() >= 11 && file_lower.size() <= 17 &&
+                       file_lower.substr(file_lower.size() - 4) == L".mid";
+            bool is_program = valid_suffix && file_lower.substr(0, 5) == L"12prg";
+            bool is_timbre = valid_suffix && file_lower.substr(0, 5) == L"12tmb";
             if (is_program || is_timbre) {
                 std::wstring dir = chosen.substr(0, chosen.find_last_of(L"\\/") + 1);
-                std::wstring id = filename.substr(5, 2);
+                std::wstring id = filename.substr(5, filename.size() - 9);
                 program_file = dir + L"12prg" + id + L".mid";
                 timbre_file = dir + L"12tmb" + id + L".mid";
                 if (GetFileAttributesW(program_file.c_str()) == INVALID_FILE_ATTRIBUTES ||
@@ -598,6 +596,11 @@ private:
             // Apply is atomic with respect to the emulation thread. The firmware
             // reads the freshly installed data on the next MIDI preset change.
             preview_active_ = false;
+            // A manually supplied pair becomes this instance's new project bank.
+            // It remains playable when the user switches back from a library.
+            original_programs_ = program_image;
+            original_timbres_ = timbre_image;
+            active_library_index_ = 0;
             if (library_) SendMessageW(library_, CB_SETCURSEL, 0, 0);
             if (title_) SetWindowTextW(title_,
                 L"125A  /  OB-12 PRESET BROWSER  |  ACTIVE MEMORY");
