@@ -9,8 +9,6 @@
 #include "tms57070/tms57070.h"
 #include "ob12_engine.h"
 #include <algorithm>
-#include <chrono>
-#include <condition_variable>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -169,6 +167,7 @@ struct Engine::Impl {
 
     // Inputs from other threads, taken in at each millisecond.
     std::mutex input_lock;
+    std::mutex run_lock; // protects entire Master CPU run and flash against UI snapshots
     std::atomic<bool> input_waiting{false};
     std::vector<u8> midi_bytes;
     int bank_msb = 64, bank_lsb = 0; // channel 1, last MIDI bank select
@@ -229,11 +228,6 @@ struct Engine::Impl {
     long flash_seen = 0, flash_changed_at = 0;
     bool flash_dirty = false;
     std::atomic<long> flash_count{0};
-    std::mutex snapshot_lock;
-    std::condition_variable snapshot_cv;
-    bool snapshot_requested = false;
-    bool snapshot_ready = false;
-    std::vector<u8> snapshot_data;
 
     static void sector_of(u32 offset, u32& start, u32& size) {  // 29F800 top boot block map
         if (offset >= 0xfc000) { start = 0xfc000; size = 0x4000; }
@@ -286,17 +280,6 @@ struct Engine::Impl {
     void take_inputs() {
         if (!input_waiting.exchange(false)) return;
         std::lock_guard<std::mutex> hold(input_lock);
-        if (snapshot_requested) {
-            // The only writer to Master::flash is this engine thread. Snapshot at its
-            // millisecond boundary; never read a live flash vector from a DAW thread.
-            {
-                std::lock_guard<std::mutex> snap(snapshot_lock);
-                snapshot_data = m->flash;
-                snapshot_ready = true;
-            }
-            snapshot_requested = false;
-            snapshot_cv.notify_all();
-        }
         if (!midi_bytes.empty()) { m->midi_in(midi_bytes); midi_bytes.clear(); }
         if (forget) {
             forget = false;
@@ -560,22 +543,13 @@ bool Engine::reload(const std::string& rom_dir, const std::vector<uint8_t>& byte
 
 bool Engine::snapshot_flash(std::vector<uint8_t>& bytes) {
     Impl& e = *impl;
-    {
-        std::lock_guard<std::mutex> guard(e.input_lock);
-        if (e.snapshot_requested) return false; // at most one synchronous client
-        {
-            std::lock_guard<std::mutex> snap(e.snapshot_lock);
-            e.snapshot_ready = false;
-        }
-        e.snapshot_requested = true;
-        e.input_waiting = true;
-    }
-    std::unique_lock<std::mutex> guard(e.snapshot_lock);
-    if (!e.snapshot_cv.wait_for(guard, std::chrono::milliseconds(2000),
-                               [&e] { return e.snapshot_ready; })) return false;
-    bytes = e.snapshot_data;
-    e.snapshot_ready = false;
-    return true;
+    // The asynchronous feeder can sleep forever while its output ring is full
+    // (e.g. a stopped DAW transport). Do not wait for a future CPU tick.
+    // Every Master flash writer runs inside Engine::run(), protected by this
+    // lock. Capture directly even while the feeder is paused.
+    std::lock_guard<std::mutex> running(e.run_lock);
+    bytes = e.m->flash;
+    return bytes.size() == 0x100000;
 }
 
 void Engine::detach_flash_file() {
@@ -746,6 +720,7 @@ Engine::~Engine() {
 
 void Engine::run(int32_t* frames, int n) {
     Impl& e = *impl;
+    std::lock_guard<std::mutex> running(e.run_lock);
     e.out = frames;
     e.made = 0;
     while (e.made < n) e.next_batch();
