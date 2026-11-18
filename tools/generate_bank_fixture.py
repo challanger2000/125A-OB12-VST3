@@ -44,13 +44,17 @@ def midi_bank(image: bytes, base: int, label: str) -> bytes:
               syx(0x6F, f". Updating Sect.[{label}] .".encode("ascii")),
               syx(0x70, b"> From dump OB 12 <")]
     cursor = base
+    size_marker = syx(0x7B if label=="PROGRAM" else 0x7C,
+                      f"{len(image):05X}".encode("ascii"))
+    if getattr(midi_bank, "size_first", False):
+        events.append(size_marker)
     for start in range(0, len(image), 42):
         chunk = image[start:start+42]
         events.append(syx(0x7F, f"{cursor:05X}".encode("ascii") +
                           bytes((len(chunk),)) + pack_7_1(chunk)))
         cursor += len(chunk)
-    events.append(syx(0x7B if label=="PROGRAM" else 0x7C,
-                      f"{len(image):05X}".encode("ascii")))  # original Program/Timbre section end
+    if not getattr(midi_bank, "size_first", False):
+        events.append(size_marker)  # community variant: size after the records
     events.append(syx(0x7D))
     # Standard MIDI format 0. Send 10ms between records in the synthetic test
     # to reduce CI runtime. The hardware-compatible loader itself still sends
@@ -65,20 +69,22 @@ def midi_bank(image: bytes, base: int, label: str) -> bytes:
     return b"MThd" + struct.pack(">IHHH", 6, 0, 1, 384) + b"MTrk" + struct.pack(">I",len(track)) + track
 
 def main():
-    if len(sys.argv) not in (4, 5) or (len(sys.argv) == 5 and sys.argv[4] != "--ui-names"):
-        sys.exit("usage: generate_bank_fixture.py <original rom/presets> <output folder> <suffix> [--ui-names]")
+    flags = set(sys.argv[4:])
+    if len(sys.argv) < 4 or flags.difference({"--ui-names", "--size-first"}) or len(flags) != len(sys.argv[4:]):
+        sys.exit("usage: generate_bank_fixture.py <original rom/presets> <output folder> <suffix> [--ui-names] [--size-first]")
     rom, target, suffix = pathlib.Path(sys.argv[1]),pathlib.Path(sys.argv[2]),sys.argv[3]
     if not 2 <= len(suffix) <= 8 or not suffix.isalnum():
         sys.exit("suffix must be 2 to 8 ASCII alphanumeric characters")
     target.mkdir(parents=True,exist_ok=True)
     midi_bank.va2 = suffix.upper() == "VA2"
+    midi_bank.size_first = "--size-first" in flags
     for kind,base,nbytes,label in (("prg",0xD0000,40448,"PROGRAM"),
                                    ("tmb",0xC0000,42752,"TIMBRE")):
         source=rom/f"12{kind}FS.bin"
         image=source.read_bytes()
         if len(image)!=nbytes:
             sys.exit(f"ERROR {source}: expected {nbytes} bytes; got {len(image)}")
-        if len(sys.argv) == 5 and sys.argv[4] == "--ui-names":
+        if "--ui-names" in flags:
             # Test-only alternate names; the factory record parameters remain
             # untouched. The original SysEx checksums are recalculated.
             test_name = b"UI Browser" if kind == "prg" else b"UI Timbre"
