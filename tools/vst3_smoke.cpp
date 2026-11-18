@@ -143,10 +143,20 @@ static bool test_scale(IComponent* component, MemoryState* saved) {
         HWND bk = GetDlgItem(browser, 3102);
         HWND list = GetDlgItem(browser, 3104);
         HWND library = GetDlgItem(browser, 3110);
+        wchar_t program_label[256] = {};
+        if (list) SendMessageW(list, LB_GETTEXT, 0, (LPARAM)program_label);
+        bool factory_program_ok = wcsstr(program_label, L"OB Fat Pad") != nullptr;
         int initial = list ? (int)SendMessageW(list, LB_GETCOUNT, 0, 0) : -1;
         int types = ty ? (int)SendMessageW(ty, CB_GETCOUNT, 0, 0) : -1;
         int banks = bk ? (int)SendMessageW(bk, CB_GETCOUNT, 0, 0) : -1;
         int collections = library ? (int)SendMessageW(library, CB_GETCOUNT, 0, 0) : -1;
+        if (ty) {
+            SendMessageW(ty, CB_SETCURSEL, 1, 0);
+            SendMessageW(browser, WM_COMMAND, MAKEWPARAM(3101, CBN_SELCHANGE), (LPARAM)ty);
+        }
+        wchar_t timbre_label[256] = {};
+        if (list) SendMessageW(list, LB_GETTEXT, 0, (LPARAM)timbre_label);
+        bool factory_timbre_ok = wcsstr(timbre_label, L"OldStyle Pad") != nullptr;
         if (bk) {
             SendMessageW(bk, CB_SETCURSEL, 1, 0);
             SendMessageW(browser, WM_COMMAND, MAKEWPARAM(3102, CBN_SELCHANGE), (LPARAM)bk);
@@ -163,9 +173,11 @@ static bool test_scale(IComponent* component, MemoryState* saved) {
         wchar_t status[160] = {};
         if (HWND label = GetDlgItem(browser, 3109)) GetWindowTextW(label, status, 160);
         browser_ok = initial == 128 && after == 128 && types == 2 && banks == 2 &&
-                     collections >= 1 && wcsstr(status, L"Timbre") != nullptr;
-        printf("BROWSER_TEST=%s slots=%d/%d types=%d banks=%d soundbank_options=%d\n",
-               browser_ok ? "PASS" : "FAIL", initial, after, types, banks, collections);
+                     collections >= 2 && factory_program_ok && factory_timbre_ok &&
+                     wcsstr(status, L"Timbre") != nullptr;
+        printf("BROWSER_TEST=%s slots=%d/%d types=%d banks=%d soundbank_options=%d names=%s/%s\n",
+               browser_ok ? "PASS" : "FAIL", initial, after, types, banks, collections,
+               factory_program_ok ? "PASS" : "FAIL", factory_timbre_ok ? "PASS" : "FAIL");
         DestroyWindow(browser);
     } else {
         puts("BROWSER_TEST=FAIL (window not created)");
@@ -185,6 +197,13 @@ int main(int, char** argv) {
     char temp[MAX_PATH];
     GetTempPathA(MAX_PATH, temp);
     SetEnvironmentVariableA("LOCALAPPDATA", temp);  // keep the user's saved size out of this
+    // Test discovery of an external matching soundbank pair without writing to firmware.
+    std::string user_library = std::string(temp) + "\\OB12";
+    CreateDirectoryA(user_library.c_str(), nullptr);
+    user_library += "\\SoundBanks";
+    CreateDirectoryA(user_library.c_str(), nullptr);
+    { std::ofstream(user_library + "\\12prgTT.mid", std::ios::binary).put('X'); }
+    { std::ofstream(user_library + "\\12tmbTT.mid", std::ios::binary).put('X'); }
     HMODULE dll = LoadLibraryA(argv[1]);
     if (!dll) { puts("load failed"); return 1; }
     auto get = (IPluginFactory * (PLUGIN_API*)())GetProcAddress(dll, "GetPluginFactory");
