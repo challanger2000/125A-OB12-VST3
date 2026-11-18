@@ -150,6 +150,48 @@ jobs:
           development. Do not overwrite a working installation without
           keeping a backup.
           '@ | Set-Content 'build/125A-OB12-VST3/INSTALL-125A.txt' -Encoding utf8
+      - name: Assemble complete original VST3 folder for temporary private packaging
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $original = Get-ChildItem 'build/upstream-test' -Recurse -Directory |
+            Where-Object { $_.Name -eq 'OB12.vst3' -and
+                           (Test-Path (Join-Path $_.FullName 'Contents/x86_64-win/rom/12cpu152-CPU-v1.52-FINAL.bin')) } |
+            Select-Object -First 1
+          $staging = 'build/full-private-staging/OB12.vst3'
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          if ($original) {
+            Copy-Item -Path (Join-Path $original.FullName '*') -Destination $staging -Recurse -Force
+          } else {
+            Copy-Item -Path 'build/OB12.vst3/*' -Destination $staging -Recurse -Force
+          }
+          $contents = Join-Path $staging 'Contents/x86_64-win'
+          New-Item -ItemType Directory -Force -Path $contents | Out-Null
+          Copy-Item 'build/OB12.vst3/Contents/x86_64-win/OB12.vst3' (Join-Path $contents 'OB12.vst3') -Force
+          Copy-Item 'build/OB12.vst3/Contents/x86_64-win/rom' (Join-Path $contents 'rom') -Recurse -Force
+          $firmware = @(
+            '12cpu152-CPU-v1.52-FINAL.bin',
+            '12dsp111-DSP-v1.11-FINAL.bin'
+          )
+          foreach ($name in $firmware) {
+            if (-not (Test-Path (Join-Path $contents "rom/$name"))) {
+              throw "Missing original firmware: $name"
+            }
+          }
+          $module = Join-Path $contents 'OB12.vst3'
+          if (-not (Test-Path $module)) { throw 'Missing compiled 125A VST3 module' }
+          $magic = [System.IO.File]::ReadAllBytes((Resolve-Path $module))[0..1]
+          if ($magic[0] -ne 77 -or $magic[1] -ne 90) { throw 'Module is not a PE Windows binary' }
+          $data = Get-ChildItem -LiteralPath $staging -Recurse -File
+          Write-Host "COMPLETE_BUNDLE_READY files=$($data.Count) module=$((Get-Item $module).Length) original-firmware=YES"
+          Write-Host "COMPILED_MODULE_SHA256=$((Get-FileHash $module -Algorithm SHA256).Hash)"
+      - name: Upload one-folder full OB-12 bundle for personal assembly
+        uses: actions/upload-artifact@v4
+        with:
+          name: 125A-OB12-full-bundle-private-staging
+          path: build/full-private-staging/OB12.vst3/
+          retention-days: 1
+          if-no-files-found: error
       - name: Publish firmware-free tested DLL patch artifact
         uses: actions/upload-artifact@v4
         with:
