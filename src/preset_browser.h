@@ -121,6 +121,10 @@ private:
     std::array<std::array<std::string, 256>, 2> names_{};
     std::array<std::array<std::string, 256>, 2> preview_names_{};
     bool preview_active_ = false;
+    // 0 = the DAW project's sound before external library browsing;
+    // 1..N = an installed (but not necessarily selected) bank from disk.
+    int active_library_index_ = 0;
+    std::vector<uint8_t> original_programs_, original_timbres_;
     std::set<int> favorites_;
     int selected_slot_ = -1;
     int selected_key_ = -1;
@@ -332,7 +336,7 @@ private:
         for (int slot = 0; slot < 128; ++slot) {
             int key = slot_key(slot);
             if (only && !favorites_.count(key)) continue;
-            const std::string& name = (preview_active_ ? preview_names_ : names_)[ty][bank * 128 + slot];
+            const std::string& name = names_[ty][bank * 128 + slot];
             wchar_t number[24] = {};
             swprintf(number, 24, L"%lc-%03d", bank ? L'B' : L'A', slot + 1);
             std::wstring label = std::wstring(favorites_.count(key) ? L"\u2605  " : L"    ") +
@@ -348,10 +352,6 @@ private:
         InvalidateRect(list_, nullptr, TRUE);
     }
     void select_current() {
-        if (preview_active_) {
-            text_status(L"This soundbank is only being previewed. Use Load Bank Pair to activate it.");
-            return;
-        }
         if (transferring_) {
             text_status(L"Soundbank transfer in progress. Preset selection is temporarily disabled.");
             return;
@@ -428,44 +428,95 @@ private:
                   [](const BankPair& a, const BankPair& b) { return lower(a.title) < lower(b.title); });
         if (library_) {
             SendMessageW(library_, CB_RESETCONTENT, 0, 0);
-            SendMessageW(library_, CB_ADDSTRING, 0, (LPARAM)L"Choose a soundbank pair, or browse for .mid/.syx...");
+            SendMessageW(library_, CB_ADDSTRING, 0, (LPARAM)L"Current project memory");
             for (const BankPair& entry : bank_pairs_)
                 SendMessageW(library_, CB_ADDSTRING, 0, (LPARAM)entry.title.c_str());
-            SendMessageW(library_, CB_SETCURSEL, 0, 0);
+            SendMessageW(library_, CB_SETCURSEL,
+                         active_library_index_ <= (int)bank_pairs_.size() ? active_library_index_ : 0, 0);
         }
     }
-    void preview_bank() {
-        const int index = library_ ? (int)SendMessageW(library_, CB_GETCURSEL, 0, 0) - 1 : -1;
-        preview_active_ = index >= 0 && index < (int)bank_pairs_.size();
-        preview_names_[0].fill({});
-        preview_names_[1].fill({});
-        if (!preview_active_) {
-            if (title_) SetWindowTextW(title_, L"125A  /  OB-12 PRESET BROWSER  |  ACTIVE MEMORY");
-            if (list_) EnableWindow(list_, !transferring_);
-            fill();
+    // The hardware OB-12 only has A/B (128 presets each). Our six library
+    // sets stay on disk and are directly selectable: switching a *library*
+    // stages its complete Program+Timbre pair into the PRIVATE flash of this
+    // plug-in instance. No original-firmware bulk-update procedure or dialog.
+    void choose_library() {
+        const int choice = library_ ? (int)SendMessageW(library_, CB_GETCURSEL, 0, 0) : -1;
+        if (choice < 0 || choice > (int)bank_pairs_.size() ||
+            choice == active_library_index_) return;
+        const int previous = active_library_index_;
+        auto refuse = [&](const std::string& reason) {
+            text_status(L"Bank switch failed: " + wide(reason));
+            SendMessageW(library_, CB_SETCURSEL, previous, 0);
+        };
+        if (transferring_ || engine_.sysex_waiting() > 0) {
+            refuse("original MIDI update in progress");
             return;
         }
-        const BankPair& bank = bank_pairs_[index];
-        std::vector<uint8_t> bytes;
-        std::vector<uint8_t> image;
-        int count = 0;
-        for (int type = 0; type < 2; ++type) {
-            const std::wstring& path = type == 0 ? bank.program_path : bank.timbre_path;
-            bytes.clear();
-            image.clear();
-            uint32_t flash_address = 0;
-            if (Engine::read_sysex(path, bytes).empty() &&
-                Engine::decode_bank(bytes, image, flash_address).empty() &&
-                flash_address == (type == 0 ? 0xD0000u : 0xC0000u) &&
-                scan_names(type, image, &preview_names_[type])) ++count;
+        std::vector<uint8_t> programs, timbres;
+        if (choice == 0) {
+            if (original_programs_.size() != 40448 || original_timbres_.size() != 42752) {
+                refuse("no saved original project bank");
+                return;
+            }
+            programs = original_programs_;
+            timbres = original_timbres_;
+        } else {
+            const BankPair& pair = bank_pairs_[choice - 1];
+            std::vector<uint8_t> ps, ts;
+            std::string pe = Engine::read_sysex(pair.program_path, ps);
+            std::string te = Engine::read_sysex(pair.timbre_path, ts);
+            if (!pe.empty() || !te.empty()) {
+                refuse(!pe.empty() ? pe : te);
+                return;
+            }
+            uint32_t program_offset = 0, timbre_offset = 0;
+            pe = Engine::decode_bank(ps, programs, program_offset);
+            te = Engine::decode_bank(ts, timbres, timbre_offset);
+            if (!pe.empty() || !te.empty() ||
+                program_offset != 0xD0000 || timbre_offset != 0xC0000) {
+                refuse(!pe.empty() ? pe : !te.empty() ? te : "unexpected bank address");
+                return;
+            }
         }
-        if (title_) SetWindowTextW(title_, L"125A  /  OB-12 PRESET BROWSER  |  LIBRARY PREVIEW (NOT LOADED)");
-        if (list_) EnableWindow(list_, FALSE); // preview entries must not recall a different bank
+        if (original_programs_.empty() || original_timbres_.empty()) {
+            std::vector<uint8_t> snapshot;
+            if (!engine_.snapshot_flash(snapshot) || snapshot.size() != 0x100000) {
+                refuse("could not snapshot project memory");
+                return;
+            }
+            original_programs_.assign(snapshot.begin() + 0xD0000,
+                                      snapshot.begin() + 0xD0000 + 40448);
+            original_timbres_.assign(snapshot.begin() + 0xC0000,
+                                     snapshot.begin() + 0xC0000 + 42752);
+        }
+        if (!engine_.apply_bank_pair(programs, timbres)) {
+            refuse("flash engine is busy");
+            return;
+        }
+        active_library_index_ = choice;
+        preview_active_ = false;
+        last_index_writes_ = -1;
+        // Index names immediately, including during the original CPU's boot
+        // period; the regular timer can later refresh user-edited flash names.
+        names_[0].fill({});
+        names_[1].fill({});
+        scan_names(0, programs);
+        scan_names(1, timbres);
+        selected_slot_ = 0;
+        selected_key_ = slot_key(0);
+        if (engine_.sounding_ready())
+            engine_.select_preset(type_value() == 0, bank_value(), 0);
         fill();
-        text_status(count == 2
-            ? L"Preview only. Both Program and Timbre names identified. Load Bank Pair to activate."
-            : L"Preview only. Some names are unavailable; load the pair to use its sounds.");
+        if (list_) SendMessageW(list_, LB_SETCURSEL, 0, 0);
+        if (title_) SetWindowTextW(title_,
+              choice ? L"125A  /  OB-12 PRESET BROWSER  |  ACTIVE LIBRARY"
+                     : L"125A  /  OB-12 PRESET BROWSER  |  PROJECT MEMORY");
+        const std::wstring display = choice ? bank_pairs_[choice - 1].title : L"Current project memory";
+        text_status(display + L" — ready. Select any sound to play.");
     }
+    // Compatibility with existing callbacks. Merely choosing a library is
+    // enough: do not leave a non-playable preview and require a second import.
+    void preview_bank() { choose_library(); }
     void import_bank() {
         if (transferring_ || engine_.sysex_waiting() > 0) {
             text_status(L"A soundbank transfer is already in progress.");
@@ -589,9 +640,9 @@ private:
                                             WS_BORDER | WS_TABSTOP, id_list);
         favorite_ = control(L"BUTTON", L"Toggle favorite", BS_PUSHBUTTON | WS_TABSTOP, id_favorite);
         only_favorites_ = control(L"BUTTON", L"Only favorites", BS_AUTOCHECKBOX | WS_TABSTOP, id_only_favorites);
-        import_ = control(L"BUTTON", L"Load Bank Pair", BS_PUSHBUTTON | WS_TABSTOP, id_import);
+        import_ = control(L"BUTTON", L"Add External Bank...", BS_PUSHBUTTON | WS_TABSTOP, id_import);
         close_ = control(L"BUTTON", L"Close", BS_PUSHBUTTON | WS_TABSTOP, id_close);
-        status_ = control(L"STATIC", L"Select an entry. Program Map must be disabled on the OB-12.", SS_LEFT, id_status);
+        status_ = control(L"STATIC", L"Choose a sound library above, then click a preset to play it.", SS_LEFT, id_status);
         SendMessageW(type_, CB_ADDSTRING, 0, (LPARAM)L"Programs");
         SendMessageW(type_, CB_ADDSTRING, 0, (LPARAM)L"Timbres");
         SendMessageW(type_, CB_SETCURSEL, 0, 0);
@@ -644,7 +695,7 @@ private:
         }
         case WM_COMMAND:
             if (LOWORD(w) == id_library && HIWORD(w) == CBN_SELCHANGE) {
-                self->preview_bank();
+                self->choose_library();
                 return 0;
             }
             if (LOWORD(w) == id_type || LOWORD(w) == id_bank) {
