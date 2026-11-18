@@ -115,12 +115,12 @@ static bool test_scale(IComponent* component, MemoryState* saved) {
     Frame frame;
     view->setFrame(&frame);
     view->attached(parent, kPlatformTypeHWND);
-    bool state_open_editor_ok = false;
+    bool state_open_editor_ok = (saved == nullptr);
     if (saved && !saved->storage.empty()) {
         saved->pos = 0;
         state_open_editor_ok = component->setState(saved) == kResultOk;
     }
-    printf("PROJECT_RECALL_WITH_EDITOR=%s\n", state_open_editor_ok ? "PASS" : "FAIL");
+    if (saved) printf("PROJECT_RECALL_WITH_EDITOR=%s\n", state_open_editor_ok ? "PASS" : "FAIL");
     HWND child = FindWindowExW(parent, nullptr, nullptr, nullptr);
     for (int percent : {50, 67, 200, 100}) {
         frame.calls_back = percent != 67;
@@ -299,9 +299,16 @@ int main(int, char** argv) {
     }
     const bool audio_ok = first_sound > 10.0 && first_sound < 17.0 && frames > 0 && sum / frames > 1e-9;
     printf("AUDIO_TEST=%s\n", audio_ok ? "PASS" : "FAIL");
+    // First choose Timbre B-007 through the actual browser while the machine
+    // is fully booted. Then ensure the exact selection is serialized/recalled.
+    const bool preselect_browser_ok = test_scale(component, nullptr);
     MemoryState state;
     const tresult state_result = component->getState(&state);
     bool state_ok = state_result == kResultOk && state.storage.size() == 0x100000 + 24;
+    int32_t captured_program = -1;
+    if (state_ok) memcpy(&captured_program, state.storage.data() + 20, sizeof captured_program);
+    state_ok = state_ok && captured_program == 134; // Timbre B-007, index 128+6
+    printf("PROJECT_SELECTED_PRESET=%d expected=134\n", captured_program);
     if (state_ok) {
         state.pos = 0;
         state_ok = component->setState(&state) == kResultOk;
@@ -312,5 +319,5 @@ int main(int, char** argv) {
     component->setActive(false);
     component->terminate();
     component->release();
-    return audio_ok && state_ok && browser_ok ? 0 : 2;
+    return audio_ok && preselect_browser_ok && state_ok && browser_ok ? 0 : 2;
 }
