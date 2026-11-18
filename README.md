@@ -1,5 +1,14 @@
 # 125A OB-12 VST3 — development branch
 
+> **P007 audit / development branch:** Critical test gaps remain. A negative
+> control reproduced a project-private factory-reset bug; another Windows
+> integration run exposed a bank-selection/flash-recall race. Corrections are
+> in the isolated audit branch and MUST pass the exact SHA's Windows integration
+> checks before merge. Official validator, 125A Tester, Studio One interactions
+> and all-panel-control QA remain **NOT VERIFIED**.
+> See [P007 findings](docs/P007-AUDIT-FINDINGS-2026-11-18.md) and the
+> [251-entry control matrix](docs/P007-CONTROL-MATRIX.csv).
+
 This repository is a derivative of [Tuth/ob12-emu](https://github.com/Tuth/ob12-emu) under GPL-3.0.
 It adds a native searchable **Program/Timbre Preset Browser**, paired \`12prgXX.mid\` /
 \`12tmbXX.mid\` import, and preliminary **per-DAW-project flash-state recall**.
