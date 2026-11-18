@@ -589,7 +589,7 @@ int main(int, char** argv) {
         const bool ok=calls && seen[0] && seen[1] &&
             targets[0]==actuals[0] && targets[1]==actuals[1] &&
             (long long)(actuals[1]-actuals[0])==separation;
-        std::printf("P007_MIDI_OFFSET_DISPATCH=%s diff=%lld expected=%lld\\n",
+        std::printf("P007_MIDI_OFFSET_DISPATCH=%s diff=%lld expected=%lld\n",
                     ok?"PASS":"FAIL",
                     seen[0]&&seen[1]?(long long)(actuals[1]-actuals[0]):-1LL,
                     separation);

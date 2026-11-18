@@ -149,7 +149,7 @@ struct Instrument {
                         if (message->frame > current) break;
                         if (dispatch_probe) {
                             fprintf(dispatch_probe,
-                                    "P007_DISPATCH target=%llu actual=%llu status=%u pitch=%u\\n",
+                                    "P007_DISPATCH target=%llu actual=%llu status=%u pitch=%u\n",
                                     (unsigned long long)message->frame,
                                     (unsigned long long)current,
                                     (unsigned)message->bytes[0],
