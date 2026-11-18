@@ -35,7 +35,7 @@ jobs:
           if errorlevel 1 exit /b 1
           clang-cl /nologo /EHsc /std:c++17 /D_CRT_SECURE_NO_WARNINGS /Isrc /Isrc\shim /Isrc\f2mc16 /Ibuild /FIemu.h /c src\f2mc16\f2mc16.cpp /Fobuild\f2mc16.obj
           if errorlevel 1 exit /b 1
-          clang-cl /nologo /EHsc /std:c++17 /D_CRT_SECURE_NO_WARNINGS /Isrc /Ibuild /FIemu.h /c src\tms57070\tms57070.cpp /Fobuild\tms57070.obj
+          clang-cl /nologo /EHsc /std:c++17 /D_CRT_SECURE_NO_WARNINGS /Isrc /Isrc\shim /Isrc\f2mc16 /Ibuild /FIemu.h /c src\tms57070\tms57070.cpp /Fobuild\tms57070.obj
           if errorlevel 1 exit /b 1
           clang-cl /nologo /EHsc /std:c++17 /Ivendor\vst3sdk /c vendor\vst3sdk\pluginterfaces\base\coreiids.cpp /Fobuild\coreiids.obj
           if errorlevel 1 exit /b 1
