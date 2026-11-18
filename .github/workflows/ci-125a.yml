@@ -1,4 +1,4 @@
-name: 125A OB-12 source compile check
+name: 125A OB-12 VST3 Windows integration tests
 on:
   push:
     branches: [feature/preset-browser-audit]
@@ -104,3 +104,35 @@ jobs:
           build\vst3_norom_smoke.exe build\OB12.vst3\Contents\x86_64-win\OB12.vst3
           if errorlevel 1 exit /b 1
 
+      - name: Package 125A Windows VST3 patch without original ROM files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path 'build/125A-OB12-VST3' | Out-Null
+          Copy-Item 'build/OB12.vst3/Contents/x86_64-win/OB12.vst3' 'build/125A-OB12-VST3/OB12.vst3'
+          @'
+          125A OB-12 VST3 — development build for personal evaluation
+
+          1. Obtain the original upstream bundle:
+             https://github.com/Tuth/ob12-emu/releases/tag/v0.10.0
+          2. Keep the original OB12.vst3 folder with its rom subfolder.
+          3. Overwrite OB12.vst3\Contents\x86_64-win\OB12.vst3
+             with the enclosed 125A file.
+          4. Copy the whole OB12.vst3 folder to the Windows VST3 directory
+             (normally C:\Program Files\Common Files\VST3\).
+          5. Rescan the plugin list in Studio One.
+          6. Right-click the original blue hardware panel and choose
+             "Preset Browser..." to open the added browser.
+
+          Important: This patch includes no proprietary firmware/ROM.
+          The 125A browser and project-recall functionality is still in
+          development. Do not overwrite a working installation without
+          keeping a backup.
+          '@ | Set-Content 'build/125A-OB12-VST3/INSTALL-125A.txt' -Encoding utf8
+      - name: Publish firmware-free tested DLL patch artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 125A-OB12-VST3-patch-win64
+          path: build/125A-OB12-VST3/*
+          retention-days: 14
+          if-no-files-found: error
