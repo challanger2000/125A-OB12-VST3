@@ -46,7 +46,7 @@ public:
             WNDCLASSW wc = {};
             wc.lpfnWndProc = &PresetBrowser::proc;
             wc.hInstance = instance;
-            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
             wc.lpszClassName = L"125A_OB12_PresetBrowser";
             if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return;
             registered = true;
@@ -284,11 +284,11 @@ private:
         if (!GetOpenFileNameW(&dlg)) return;
         std::wstring chosen(path);
         std::wstring filename = chosen.substr(chosen.find_last_of(L"\\/") + 1);
-        std::wstring small = lower(filename);
-        bool is_program = small.size() == 11 && small.substr(0, 5) == L"12prg" &&
-                          small.substr(7) == L".mid";
-        bool is_timbre = small.size() == 11 && small.substr(0, 5) == L"12tmb" &&
-                         small.substr(7) == L".mid";
+        std::wstring file_lower = lower(filename);
+        bool is_program = file_lower.size() == 11 && file_lower.substr(0, 5) == L"12prg" &&
+                          file_lower.substr(7) == L".mid";
+        bool is_timbre = file_lower.size() == 11 && file_lower.substr(0, 5) == L"12tmb" &&
+                         file_lower.substr(7) == L".mid";
 
         std::wstring program_file, timbre_file;
         if (is_program || is_timbre) {
