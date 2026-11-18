@@ -115,6 +115,23 @@ static bool test_scale(IComponent* component, MemoryState* saved) {
     Frame frame;
     view->setFrame(&frame);
     view->attached(parent, kPlatformTypeHWND);
+    // Studio One can restore an outdated container height when reloading
+    // an instrument: onSize must enforce the art's aspect and resize the
+    // Win32 child, rather than leaving a black band below the controls.
+    ViewRect wrong_height = size;
+    wrong_height.bottom += 96;
+    view->onSize(&wrong_height);
+    ViewRect corrected_height{};
+    view->getSize(&corrected_height);
+    HWND sized_child = FindWindowExW(parent, nullptr, L"125A_OB12_PanelView_v2", nullptr);
+    RECT sized_rect{};
+    if (sized_child) GetClientRect(sized_child, &sized_rect);
+    const bool editor_height_ok = sized_child &&
+        corrected_height.getHeight() == size.getHeight() &&
+        sized_rect.bottom == size.getHeight();
+    printf("EDITOR_RELOAD_HEIGHT_TEST=%s host_height=%d corrected=%d child=%ld\\n",
+        editor_height_ok ? "PASS" : "FAIL",
+        wrong_height.getHeight(), corrected_height.getHeight(), sized_rect.bottom);
     bool state_open_editor_ok = (saved == nullptr);
     if (saved && !saved->storage.empty()) {
         saved->pos = 0;
@@ -190,7 +207,7 @@ static bool test_scale(IComponent* component, MemoryState* saved) {
     again->release();
     DestroyWindow(parent);
     controller->release();
-    return browser_ok && state_open_editor_ok;
+    return browser_ok && state_open_editor_ok && editor_height_ok;
 }
 
 // Regression for Studio One: remove an instrument, reinstantiate it,
