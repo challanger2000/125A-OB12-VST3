@@ -50,7 +50,7 @@ public:
         HWND owner = GetAncestor(panel, GA_ROOT);
         window_ = CreateWindowExW(WS_EX_TOOLWINDOW, window_class(),
              L"125A OB-12 | Preset Browser", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-             CW_USEDEFAULT, CW_USEDEFAULT, 700, 600, owner, nullptr, window_module_, this);
+             CW_USEDEFAULT, CW_USEDEFAULT, 980, 620, owner, nullptr, window_module_, this);
         if (window_) SetForegroundWindow(window_);
     }
 
@@ -113,7 +113,8 @@ private:
     std::string rom_dir_;
     HWND window_ = nullptr, type_ = nullptr, bank_ = nullptr, search_ = nullptr;
     HWND list_ = nullptr, status_ = nullptr, favorite_ = nullptr, only_favorites_ = nullptr;
-    HWND title_ = nullptr, import_ = nullptr, close_ = nullptr, library_ = nullptr;
+    HWND title_ = nullptr, library_label_ = nullptr;
+    HWND import_ = nullptr, close_ = nullptr, library_ = nullptr;
     struct BankPair { std::wstring title, program_path, timbre_path; };
     std::vector<BankPair> bank_pairs_;
     HBRUSH background_ = nullptr, field_brush_ = nullptr;
@@ -306,7 +307,7 @@ private:
         if (path.empty()) return;
         std::ifstream file(path);
         int key;
-        while (file >> key) if (key >= 0 && key < 512) favorites_.insert(key);
+        while (file >> key) if (key >= 0 && key < 1024 * 1024) favorites_.insert(key);
     }
     void save_favorites() {
         const std::string path = favorites_file();
@@ -316,7 +317,12 @@ private:
     }
     int type_value() const { return (int)SendMessageW(type_, CB_GETCURSEL, 0, 0) == 1 ? 1 : 0; }
     int bank_value() const { return (int)SendMessageW(bank_, CB_GETCURSEL, 0, 0) == 1 ? 1 : 0; }
-    int slot_key(int slot) const { return type_value() * 256 + bank_value() * 128 + slot; }
+    int slot_key(int slot) const {
+        // Favorites belong to a sound library, not the coincidentally same
+        // Program A/B slot number in all the other libraries.
+        return active_library_index_ * 512 +
+               type_value() * 256 + bank_value() * 128 + slot;
+    }
     void text_status(const std::wstring& message) {
         if (status_) SetWindowTextW(status_, message.c_str());
     }
@@ -411,7 +417,7 @@ private:
             else if (id == L"jx2") title = L"Jexus / WC Olo Garb — Set 2";
             else if (id == L"sp") title = L"Syntpelle — 39 Patches (Bank B)";
             else if (id == L"ip") title = L"Individual POB / TOB Patches";
-            BankPair pair{title + L" — " + directory, directory + L"\\" + program, timbre_path};
+            BankPair pair{title, directory + L"\\" + program, timbre_path};
             bool duplicate = false;
             for (const BankPair& old : into)
                 if (lower(old.program_path) == lower(pair.program_path)) duplicate = true;
@@ -427,11 +433,11 @@ private:
         std::sort(bank_pairs_.begin(), bank_pairs_.end(),
                   [](const BankPair& a, const BankPair& b) { return lower(a.title) < lower(b.title); });
         if (library_) {
-            SendMessageW(library_, CB_RESETCONTENT, 0, 0);
-            SendMessageW(library_, CB_ADDSTRING, 0, (LPARAM)L"Current project memory");
+            SendMessageW(library_, LB_RESETCONTENT, 0, 0);
+            SendMessageW(library_, LB_ADDSTRING, 0, (LPARAM)L"Current project memory");
             for (const BankPair& entry : bank_pairs_)
-                SendMessageW(library_, CB_ADDSTRING, 0, (LPARAM)entry.title.c_str());
-            SendMessageW(library_, CB_SETCURSEL,
+                SendMessageW(library_, LB_ADDSTRING, 0, (LPARAM)entry.title.c_str());
+            SendMessageW(library_, LB_SETCURSEL,
                          active_library_index_ <= (int)bank_pairs_.size() ? active_library_index_ : 0, 0);
         }
     }
@@ -440,13 +446,13 @@ private:
     // stages its complete Program+Timbre pair into the PRIVATE flash of this
     // plug-in instance. No original-firmware bulk-update procedure or dialog.
     void choose_library() {
-        const int choice = library_ ? (int)SendMessageW(library_, CB_GETCURSEL, 0, 0) : -1;
+        const int choice = library_ ? (int)SendMessageW(library_, LB_GETCURSEL, 0, 0) : -1;
         if (choice < 0 || choice > (int)bank_pairs_.size() ||
             choice == active_library_index_) return;
         const int previous = active_library_index_;
         auto refuse = [&](const std::string& reason) {
             text_status(L"Bank switch failed: " + wide(reason));
-            SendMessageW(library_, CB_SETCURSEL, previous, 0);
+            SendMessageW(library_, LB_SETCURSEL, previous, 0);
         };
         if (transferring_ || engine_.sysex_waiting() > 0) {
             refuse("original MIDI update in progress");
@@ -601,7 +607,7 @@ private:
             original_programs_ = program_image;
             original_timbres_ = timbre_image;
             active_library_index_ = 0;
-            if (library_) SendMessageW(library_, CB_SETCURSEL, 0, 0);
+            if (library_) SendMessageW(library_, LB_SETCURSEL, 0, 0);
             if (title_) SetWindowTextW(title_,
                 L"125A  /  OB-12 PRESET BROWSER  |  ACTIVE MEMORY");
             if (list_) EnableWindow(list_, TRUE);
@@ -635,7 +641,10 @@ private:
             return hwnd;
         };
         title_ = control(L"STATIC", L"125A  /  OB-12 PRESET BROWSER  |  ACTIVE MEMORY", SS_LEFT, 0);
-        library_ = control(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, id_library);
+        library_label_ = control(L"STATIC", L"SOUND LIBRARIES  /  DIRECT PLAY", SS_LEFT, 0);
+        library_ = control(L"LISTBOX", L"",
+                 LBS_NOTIFY | LBS_HASSTRINGS | WS_BORDER | WS_VSCROLL | WS_TABSTOP,
+                 id_library);
         type_ = control(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, id_type);
         bank_ = control(L"COMBOBOX", L"", CBS_DROPDOWNLIST, id_bank);
         search_ = control(L"EDIT", L"", ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, id_search);
@@ -656,20 +665,21 @@ private:
         fill();
     }
     void layout(int width, int height) {
-        width = std::max(width, 510);
-        height = std::max(height, 390);
+        width = std::max(width, 790);
+        height = std::max(height, 450);
         // Never enumerate sibling HWNDs: creation/Z-order can differ across Windows hosts.
         if (title_) MoveWindow(title_, 20, 10, width - 40, 25, TRUE);
-        if (library_) MoveWindow(library_, 20, 38, width - 40, 350, TRUE);
-        if (type_) MoveWindow(type_, 20, 76, 165, 200, TRUE);
-        if (bank_) MoveWindow(bank_, 195, 76, 135, 200, TRUE);
-        if (search_) MoveWindow(search_, 340, 76, width - 360, 27, TRUE);
-        if (list_) MoveWindow(list_, 20, 115, width - 40, height - 221, TRUE);
-        if (favorite_) MoveWindow(favorite_, 20, height - 92, 150, 30, TRUE);
-        if (only_favorites_) MoveWindow(only_favorites_, 180, height - 92, 155, 30, TRUE);
-        if (import_) MoveWindow(import_, width - 305, height - 92, 160, 30, TRUE);
-        if (close_) MoveWindow(close_, width - 135, height - 92, 115, 30, TRUE);
-        if (status_) MoveWindow(status_, 20, height - 51, width - 40, 40, TRUE);
+        if (library_label_) MoveWindow(library_label_, 20, 52, 255, 24, TRUE);
+        if (library_) MoveWindow(library_, 20, 80, 250, height - 188, TRUE);
+        if (type_) MoveWindow(type_, 290, 52, 175, 220, TRUE);
+        if (bank_) MoveWindow(bank_, 475, 52, 125, 220, TRUE);
+        if (search_) MoveWindow(search_, 615, 52, width - 635, 27, TRUE);
+        if (list_) MoveWindow(list_, 290, 92, width - 310, height - 200, TRUE);
+        if (favorite_) MoveWindow(favorite_, 290, height - 92, 145, 30, TRUE);
+        if (only_favorites_) MoveWindow(only_favorites_, 445, height - 92, 150, 30, TRUE);
+        if (import_) MoveWindow(import_, 20, height - 92, 250, 30, TRUE);
+        if (close_) MoveWindow(close_, width - 130, height - 92, 110, 30, TRUE);
+        if (status_) MoveWindow(status_, 290, height - 50, width - 310, 40, TRUE);
     }
     static LRESULT CALLBACK proc(HWND wnd, UINT msg, WPARAM w, LPARAM l) {
         if (msg == WM_NCCREATE) {
@@ -692,12 +702,12 @@ private:
         case WM_SIZE: self->layout(LOWORD(l), HIWORD(l)); return 0;
         case WM_GETMINMAXINFO: {
             MINMAXINFO* info = (MINMAXINFO*)l;
-            info->ptMinTrackSize.x = 510;
-            info->ptMinTrackSize.y = 390;
+            info->ptMinTrackSize.x = 790;
+            info->ptMinTrackSize.y = 450;
             return 0;
         }
         case WM_COMMAND:
-            if (LOWORD(w) == id_library && HIWORD(w) == CBN_SELCHANGE) {
+            if (LOWORD(w) == id_library && HIWORD(w) == LBN_SELCHANGE) {
                 self->choose_library();
                 return 0;
             }
@@ -759,7 +769,8 @@ private:
             self->window_ = nullptr;
             self->preview_active_ = false;
             self->type_ = self->bank_ = self->search_ = self->list_ = self->status_ = nullptr;
-            self->title_ = self->favorite_ = self->only_favorites_ = self->import_ = self->close_ = self->library_ = nullptr;
+            self->title_ = self->library_label_ = self->favorite_ = self->only_favorites_ = nullptr;
+            self->import_ = self->close_ = self->library_ = nullptr;
             return 0;
         }
         return DefWindowProcW(wnd, msg, w, l);
