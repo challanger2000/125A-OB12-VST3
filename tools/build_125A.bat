@@ -14,8 +14,8 @@ if not exist "rom\12cpu152-CPU-v1.52-FINAL.bin" (
   echo ERROR: Supply your own original OB-12 firmware in rom\ (not in Git).
   exit /b 2
 )
-if not exist "rom\dsp" (
-  echo ERROR: rom\dsp is missing. Decode the original DSP firmware with tools\ob12_carve.py.
+if not exist "rom\12dsp111-DSP-v1.11-FINAL.bin" (
+  echo ERROR: Original DSP firmware missing from rom\.
   exit /b 2
 )
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -35,6 +35,11 @@ if errorlevel 1 (
 )
 if not exist build mkdir build
 if not exist build\vst3 mkdir build\vst3
+if not exist rom\dsp\prog0.pmem.bin (
+  echo Generating original DSP program tables from the supplied ROM...
+  python tools\ob12_carve.py rom\12dsp111-DSP-v1.11-FINAL.bin -o rom\dsp
+  if errorlevel 1 goto :fail
+)
 python tools\gen_fast.py rom\dsp build\tms_fast.inc
 if errorlevel 1 goto :fail
 set "ROOTFLAGS=/O2 /EHsc /std:c++17 /D_CRT_SECURE_NO_WARNINGS /Isrc\shim /Isrc\f2mc16 /Isrc /Ibuild"
