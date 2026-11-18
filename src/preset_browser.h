@@ -176,14 +176,12 @@ private:
         if (!ready) { observed_ready_ = false; return; }
         if (!observed_ready_) { last_index_writes_ = -1; observed_ready_ = true; }
         const long before = engine_.flash_writes();
-        if (names_live_ && before == last_index_writes_) return;
+        if (before == last_index_writes_) return;
         // Capture on the engine thread at a millisecond boundary; do not access its
         // mutable flash vector directly from the Win32 editor/UI thread.
         std::vector<uint8_t> flash;
         if (!engine_.snapshot_flash(flash) || flash.size() != 0x100000 ||
             engine_.flash_writes() != before) return;
-        std::array<std::string, 256> old_p = std::move(names_[0]);
-        std::array<std::string, 256> old_t = std::move(names_[1]);
         names_[0].fill({});
         names_[1].fill({});
         const std::vector<unsigned char> programs(flash.begin() + 0xD0000,
@@ -194,8 +192,6 @@ private:
         const bool t = scan_names(1, timbres);
         // Unknown/invalid changed flash is shown using slot IDs, never the
         // names of a different Factory bank.
-        (void)old_p;
-        (void)old_t;
         names_live_ = p || t;
         last_index_writes_ = before;
         fill();
