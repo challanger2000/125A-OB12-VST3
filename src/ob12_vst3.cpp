@@ -706,11 +706,12 @@ public:
                 if (a.offset != b.offset) return a.offset < b.offset;
                 return a.order < b.order;
             });
-            // 240 extra frames provide a boundary margin above the existing lead
-            // while the VST3 host block is being submitted. This is an experimental
+            // Two 240-frame producer batches bound a concurrent worker already
+            // inside engine->run() when the VST3 host callback publishes MIDI.
+            // This is an experimental
             // producer timeline and NOT a measured audio latency/PDC claim.
             const uint64_t origin = inst->read.load(std::memory_order_acquire) +
-                                    (uint64_t)(lead_frames + 240);
+                                    (uint64_t)(lead_frames + 480);
             const double native_per_host = rate > 0 ? 48000.0 / rate : 1.0;
             for (int i=0; i<used; ++i) {
                 const Message& m = list[i];
