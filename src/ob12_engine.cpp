@@ -578,6 +578,15 @@ bool Engine::snapshot_flash(std::vector<uint8_t>& bytes) {
     return true;
 }
 
+void Engine::detach_flash_file() {
+    Impl& e = *impl;
+    // Only call before running the first sample. Future firmware writes remain
+    // private to this Engine and become part of the host's VST3 component state.
+    if (e.k != 0) return;
+    e.flash_path.clear();
+    e.flash_dirty = false;
+}
+
 void Engine::send_sysex(const uint8_t* bytes, int count, int gap_ms) {
     std::vector<std::vector<u8>> messages;
     for (int i = 0; i < count; i++) {

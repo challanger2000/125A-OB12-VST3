@@ -176,6 +176,7 @@ struct Instrument {
             std::string folder = std::string(base) + "\\OB12";
             CreateDirectoryA(folder.c_str(), nullptr);
             engine->set_flash_file(folder + "\\flash.bin");
+            engine->detach_flash_file(); // copy legacy bank; never share mutable global memory
         }
         start_feeder(preset);
         return true;

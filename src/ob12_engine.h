@@ -23,6 +23,7 @@ public:
     // the factory image; after the firmware writes flash and goes quiet for a second, the
     // sectors that differ from the factory image are saved there again, and at the end.
     void set_flash_file(const std::string& path);
+    void detach_flash_file();  // preserve initial memory, then isolate all future writes per plugin
     bool snapshot_flash(std::vector<uint8_t>& bytes);     // consistent 1-MiB image, copied by engine thread
     bool restore_flash(const std::vector<uint8_t>& bytes); // call before engine audio starts
     bool reload(const std::string& rom_dir, const std::vector<uint8_t>& bytes); // keep Engine address stable
