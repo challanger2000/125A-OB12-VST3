@@ -175,6 +175,45 @@ static bool test_scale(IComponent* component, MemoryState* saved) {
         int types = ty ? (int)SendMessageW(ty, CB_GETCOUNT, 0, 0) : -1;
         int banks = bk ? (int)SendMessageW(bk, CB_GETCOUNT, 0, 0) : -1;
         int collections = library ? (int)SendMessageW(library, CB_GETCOUNT, 0, 0) : -1;
+        // An alternate complete bank is selected from the dropdown. It must
+        // immediately change the real private flash and let notes be played:
+        // no preview-only state and no Load Bank Pair button click.
+        bool library_switch_ok = false;
+        int alternate = -1;
+        for (int row = 1; library && row < collections; ++row) {
+            wchar_t name[512] = {};
+            SendMessageW(library, CB_GETLBTEXT, row, (LPARAM)name);
+            if (wcsncmp(name, L"UI ", 3) == 0) { alternate = row; break; }
+        }
+        if (alternate >= 1 && list) {
+            SendMessageW(library, CB_SETCURSEL, alternate, 0);
+            SendMessageW(browser, WM_COMMAND, MAKEWPARAM(3110, CBN_SELCHANGE),
+                         (LPARAM)library);
+            wchar_t in_other_bank[256] = {};
+            SendMessageW(list, LB_GETTEXT, 0, (LPARAM)in_other_bank);
+            MemoryState switched_state;
+            const bool has_state = component->getState(&switched_state) == kResultOk &&
+                                   switched_state.storage.size() == 0x100000 + 24;
+            const bool flash_changed = has_state &&
+                memcmp(switched_state.storage.data() + 24 + 0xD0000, "UI Browser", 10) == 0;
+            const bool selectable = IsWindowEnabled(list) &&
+                wcsstr(in_other_bank, L"UI Browser") != nullptr &&
+                SendMessageW(list, LB_GETCOUNT, 0, 0) == 128;
+            SendMessageW(library, CB_SETCURSEL, 0, 0);
+            SendMessageW(browser, WM_COMMAND, MAKEWPARAM(3110, CBN_SELCHANGE),
+                         (LPARAM)library);
+            wchar_t restored_label[256] = {};
+            SendMessageW(list, LB_GETTEXT, 0, (LPARAM)restored_label);
+            MemoryState restored_state;
+            const bool restore_data = component->getState(&restored_state) == kResultOk &&
+                restored_state.storage.size() == 0x100000 + 24 &&
+                memcmp(restored_state.storage.data() + 24 + 0xD0000, "OB Fat Pad", 10) == 0;
+            library_switch_ok = flash_changed && selectable && restore_data &&
+                                wcsstr(restored_label, L"OB Fat Pad") != nullptr;
+            printf("LIBRARY_SWITCH_TEST=%s direct_playable=%d flash_changed=%d project_restore=%d\n",
+                   library_switch_ok?"PASS":"FAIL",selectable,flash_changed,restore_data);
+        } else puts("LIBRARY_SWITCH_TEST=FAIL: valid alternate bank not found");
+
         if (ty) {
             SendMessageW(ty, CB_SETCURSEL, 1, 0);
             SendMessageW(browser, WM_COMMAND, MAKEWPARAM(3101, CBN_SELCHANGE), (LPARAM)ty);
@@ -198,7 +237,8 @@ static bool test_scale(IComponent* component, MemoryState* saved) {
         wchar_t status[160] = {};
         if (HWND label = GetDlgItem(browser, 3109)) GetWindowTextW(label, status, 160);
         browser_ok = initial == 128 && after == 128 && types == 2 && banks == 2 &&
-                     collections >= 3 && factory_program_ok && factory_timbre_ok &&
+                     collections >= 4 && library_switch_ok &&
+                     factory_program_ok && factory_timbre_ok &&
                      wcsstr(status, L"Timbre") != nullptr;
         printf("BROWSER_TEST=%s slots=%d/%d types=%d banks=%d soundbank_options=%d names=%s/%s\n",
                browser_ok ? "PASS" : "FAIL", initial, after, types, banks, collections,
@@ -334,6 +374,15 @@ int main(int, char** argv) {
     { std::ofstream(user_library + "\\12tmbTT.mid", std::ios::binary).put('X'); }
     { std::ofstream(user_library + "\\12prgVA2.mid", std::ios::binary).put('X'); }
     { std::ofstream(user_library + "\\12tmbVA2.mid", std::ios::binary).put('X'); }
+    // A real, checksum-valid MIDI bank generated from original factory
+    // firmware data with a distinct first patch name for this test only.
+    if (!CopyFileA("build\\bank-tests\\12prgUI.mid",
+                   (user_library + "\\12prgUI.mid").c_str(), FALSE) ||
+        !CopyFileA("build\\bank-tests\\12tmbUI.mid",
+                   (user_library + "\\12tmbUI.mid").c_str(), FALSE)) {
+        puts("LIBRARY_FIXTURE_TEST=FAIL: missing generated bank");
+        return 1;
+    }
     HMODULE dll = LoadLibraryA(argv[1]);
     if (!dll) { puts("load failed"); return 1; }
     auto get = (IPluginFactory * (PLUGIN_API*)())GetProcAddress(dll, "GetPluginFactory");
