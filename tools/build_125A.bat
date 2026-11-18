@@ -67,7 +67,7 @@ if errorlevel 1 goto :fail
 echo [8/9] Link
 set "BUNDLE=build\OB12.vst3\Contents\x86_64-win"
 if not exist "%BUNDLE%" mkdir "%BUNDLE%"
-"%OB12_CC%" /LD build\vst3\plugin.obj build\vst3\coreiids.obj build\vst3\funknown.obj build\vst3\vstinitiids.obj build\vst3\iids.obj build\panel_view.obj build\ob12_engine.obj build\f2mc16.obj build\tms57070.obj synchronization.lib d2d1.lib dwrite.lib windowscodecs.lib user32.lib ole32.lib comdlg32.lib winmm.lib /Fe"%BUNDLE%\OB12.vst3"
+"%OB12_CC%" /LD build\vst3\plugin.obj build\vst3\coreiids.obj build\vst3\funknown.obj build\vst3\vstinitiids.obj build\vst3\iids.obj build\panel_view.obj build\ob12_engine.obj build\f2mc16.obj build\tms57070.obj synchronization.lib d2d1.lib dwrite.lib windowscodecs.lib gdi32.lib user32.lib ole32.lib comdlg32.lib winmm.lib /Fe"%BUNDLE%\OB12.vst3"
 if errorlevel 1 goto :fail
 echo [9/9] Package personal firmware beside the DLL
 xcopy "rom" "%BUNDLE%\rom\" /E /I /Q /Y >nul
