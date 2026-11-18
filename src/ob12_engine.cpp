@@ -602,38 +602,103 @@ void Engine::forget_flash() {
 
 std::string Engine::read_sysex(const std::wstring& path, std::vector<uint8_t>& out) {
     std::ifstream f(path, std::ios::binary);
-    std::vector<uint8_t> b((std::istreambuf_iterator<char>(f)), {});
-    if (b.empty()) return "cannot read the file";
+    if (!f) return "cannot open the file";
+    f.seekg(0, std::ios::end);
+    std::streamoff n = f.tellg();
+    if (n <= 0 || n > (64LL << 20)) return "invalid or oversized file (64 MiB maximum)";
+    f.seekg(0);
+    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), {});
+    if (bytes.size() != (size_t)n) return "cannot read the complete file";
     out.clear();
-    if (b.size() > 14 && !memcmp(b.data(), "MThd", 4)) {  // a Standard MIDI File: its F0 events
-        size_t pos = 8 + (b[4] << 24 | b[5] << 16 | b[6] << 8 | b[7]);
-        auto vlq = [&](size_t& p) { uint32_t v = 0; while (p < b.size()) { uint8_t c = b[p++]; v = v << 7 | (c & 0x7f); if (!(c & 0x80)) break; } return v; };
-        while (pos + 8 <= b.size()) {
-            size_t end = pos + 8 + (b[pos + 4] << 24 | b[pos + 5] << 16 | b[pos + 6] << 8 | b[pos + 7]);
-            bool track = !memcmp(&b[pos], "MTrk", 4);
+
+    auto be32 = [&](size_t p) -> uint32_t {
+        return (uint32_t(bytes[p]) << 24) | (uint32_t(bytes[p + 1]) << 16) |
+               (uint32_t(bytes[p + 2]) << 8) | bytes[p + 3];
+    };
+    auto vlq = [&](size_t& p, size_t end, uint32_t& value) -> bool {
+        value = 0;
+        for (int i = 0; i < 4; ++i) {
+            if (p >= end) return false;
+            uint8_t x = bytes[p++];
+            value = (value << 7) | (x & 0x7f);
+            if (!(x & 0x80)) return true;
+        }
+        return false;
+    };
+
+    if (bytes.size() >= 4 && !memcmp(bytes.data(), "MThd", 4)) {
+        if (bytes.size() < 14) return "truncated MIDI header";
+        uint32_t header_size = be32(4);
+        if (header_size < 6 || (size_t)header_size > bytes.size() - 8)
+            return "invalid MIDI header length";
+        size_t pos = 8 + header_size;
+        bool saw_track = false;
+        while (pos < bytes.size()) {
+            if (bytes.size() - pos < 8) return "truncated MIDI track header";
+            uint32_t length = be32(pos + 4);
+            bool track = !memcmp(bytes.data() + pos, "MTrk", 4);
             pos += 8;
-            uint8_t running = 0;
-            while (track && pos < end && pos < b.size()) {
-                vlq(pos);
-                uint8_t status = b[pos];
-                if (status == 0xff) { pos += 2; uint32_t n = vlq(pos); pos += n; continue; }
-                if (status == 0xf0 || status == 0xf7) {
-                    pos++;
-                    uint32_t n = vlq(pos);
-                    if (status == 0xf0) out.push_back(0xf0);
-                    out.insert(out.end(), b.begin() + pos, b.begin() + std::min(b.size(), pos + n));
-                    pos += n;
-                    continue;
+            if ((size_t)length > bytes.size() - pos) return "MIDI chunk exceeds file";
+            size_t end = pos + length;
+            if (track) {
+                saw_track = true;
+                uint8_t running = 0;
+                while (pos < end) {
+                    uint32_t delta = 0;
+                    if (!vlq(pos, end, delta) || pos >= end) return "invalid MIDI delta-time";
+                    uint8_t status = bytes[pos];
+                    if (status == 0xff) {
+                        if (end - pos < 2) return "truncated MIDI meta event";
+                        pos += 2;
+                        uint32_t size = 0;
+                        if (!vlq(pos, end, size) || size > end - pos)
+                            return "invalid MIDI meta event length";
+                        pos += size;
+                        running = 0;
+                    } else if (status == 0xf0 || status == 0xf7) {
+                        ++pos;
+                        uint32_t size = 0;
+                        if (!vlq(pos, end, size) || size > end - pos ||
+                            out.size() + size + 1 > (64u << 20))
+                            return "invalid MIDI SysEx event length";
+                        if (status == 0xf0) out.push_back(0xf0);
+                        out.insert(out.end(), bytes.begin() + pos, bytes.begin() + pos + size);
+                        pos += size;
+                        running = 0;
+                    } else {
+                        bool new_status = (status & 0x80) != 0;
+                        if (new_status) {
+                            if (status >= 0xf0) return "unsupported MIDI system event";
+                            running = status;
+                            ++pos;
+                        } else if (!running) return "MIDI running status without command";
+                        int needed = ((running & 0xf0) == 0xc0 ||
+                                      (running & 0xf0) == 0xd0) ? 1 : 2;
+                        if ((size_t)needed > end - pos) return "truncated MIDI channel event";
+                        pos += needed;
+                    }
                 }
-                if (status & 0x80) { running = status; pos++; }
-                pos += (running & 0xf0) == 0xc0 || (running & 0xf0) == 0xd0 ? 1 : 2;
             }
             pos = end;
         }
+        if (!saw_track) return "no MIDI tracks";
     } else {
-        out = b;
+        out.swap(bytes);
     }
-    if (std::count(out.begin(), out.end(), (uint8_t)0xf0) == 0) return "no system exclusive in the file";
+    // Only complete F0..F7 messages may be queued to the Master UART.
+    // MIDI files can split a SysEx message between F0 and F7 continuation events.
+    bool in_message = false, complete = false;
+    for (uint8_t byte : out) {
+        if (byte == 0xf0) {
+            if (in_message) return "nested MIDI SysEx start";
+            in_message = true;
+        } else if (byte == 0xf7) {
+            if (in_message) complete = true;
+            in_message = false;
+        }
+    }
+    if (in_message) return "unfinished SysEx message";
+    if (!complete) return "no complete system exclusive message in the file";
     return "";
 }
 
