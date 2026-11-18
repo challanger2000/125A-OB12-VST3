@@ -9,6 +9,8 @@
 #include "tms57070/tms57070.h"
 #include "ob12_engine.h"
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -225,6 +227,11 @@ struct Engine::Impl {
     long flash_seen = 0, flash_changed_at = 0;
     bool flash_dirty = false;
     std::atomic<long> flash_count{0};
+    std::mutex snapshot_lock;
+    std::condition_variable snapshot_cv;
+    bool snapshot_requested = false;
+    bool snapshot_ready = false;
+    std::vector<u8> snapshot_data;
 
     static void sector_of(u32 offset, u32& start, u32& size) {  // 29F800 top boot block map
         if (offset >= 0xfc000) { start = 0xfc000; size = 0x4000; }
@@ -277,6 +284,17 @@ struct Engine::Impl {
     void take_inputs() {
         if (!input_waiting.exchange(false)) return;
         std::lock_guard<std::mutex> hold(input_lock);
+        if (snapshot_requested) {
+            // The only writer to Master::flash is this engine thread. Snapshot at its
+            // millisecond boundary; never read a live flash vector from a DAW thread.
+            {
+                std::lock_guard<std::mutex> snap(snapshot_lock);
+                snapshot_data = m->flash;
+                snapshot_ready = true;
+            }
+            snapshot_requested = false;
+            snapshot_cv.notify_all();
+        }
         if (!midi_bytes.empty()) { m->midi_in(midi_bytes); midi_bytes.clear(); }
         if (forget) {
             forget = false;
@@ -514,6 +532,37 @@ void Engine::set_flash_file(const std::string& path) {
     e.factory = e.m->flash;
     e.load_flash();
     e.flash_seen = e.m->flash_erases + e.m->flash_programs;
+}
+
+bool Engine::restore_flash(const std::vector<uint8_t>& bytes) {
+    Impl& e = *impl;
+    if (bytes.size() != e.m->flash.size() || e.k != 0) return false;
+    e.m->flash = bytes;
+    // The host project owns this image. Never leak it to the per-user shared flash file.
+    e.flash_path.clear();
+    e.factory = e.m->flash;
+    e.flash_seen = e.m->flash_erases + e.m->flash_programs;
+    return true;
+}
+
+bool Engine::snapshot_flash(std::vector<uint8_t>& bytes) {
+    Impl& e = *impl;
+    {
+        std::lock_guard<std::mutex> guard(e.input_lock);
+        if (e.snapshot_requested) return false; // at most one synchronous client
+        {
+            std::lock_guard<std::mutex> snap(e.snapshot_lock);
+            e.snapshot_ready = false;
+        }
+        e.snapshot_requested = true;
+        e.input_waiting = true;
+    }
+    std::unique_lock<std::mutex> guard(e.snapshot_lock);
+    if (!e.snapshot_cv.wait_for(guard, std::chrono::milliseconds(2000),
+                               [&e] { return e.snapshot_ready; })) return false;
+    bytes = e.snapshot_data;
+    e.snapshot_ready = false;
+    return true;
 }
 
 void Engine::send_sysex(const uint8_t* bytes, int count, int gap_ms) {
