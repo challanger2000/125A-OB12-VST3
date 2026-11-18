@@ -9,13 +9,35 @@ original-format 256-Program/256-Timbre bank-install integration test have passed
 The Steinberg Validator and Studio One practical acceptance remain outstanding; keep a backup
 of your working plug-in before installing this development build.
 
-**Open browser:** right-click the existing OB-12 hardware panel and select **Preset Browser...**.
-Use Programs/Timbres + Bank A/B; click a slot to send the documented MIDI bank select / program change.
-The original OB-12 MIDI Program Map must be disabled for the standard slot mapping.
+**Preset Browser:** right-click the original OB-12 panel and select
+**Preset Browser...** The six sound libraries are permanently visible in the
+**left sidebar**: Factory, JR Sounds, Virtual Analog 2 (VA2), Jexus 1, Jexus 2,
+and Syntpelle. Click one to activate it immediately, without a separate
+`Load Bank Pair` dialog. Then choose Programs or Timbres, hardware Bank A
+or B, and click a sound on the right to play it through the original emulated
+CPU/DSP firmware. Disable the original OB-12 MIDI Program Map for normal
+bank/slot addressing.
 
-**Bank pairs:** import both \`12prgXX.mid\` and \`12tmbXX.mid\` together using **Load Bank Pair**.
-This streams SysEx into the original firmware and can overwrite flash; it is not a read-only
-multiple-bank browser yet. Save your project first.
+**How it works:** the original hardware has only A/B (2 x 128 slots per
+type). The VST3 holds the other libraries as validated original MIDI
+Program/Timbre file pairs on disk, then places the chosen pair in its
+**project-private** flash automatically. The first `Current project memory`
+entry returns to the sounds that were active before browsing. A saved DAW
+project embeds its active 1 MiB flash image and selected MIDI program.
+Individual custom edits to *inactive* libraries are not backed up by this
+browser: save those edits before switching libraries. Favorites are
+separate for each library.
+
+**Additional bank files:** place matching `12prg<suffix>.mid` and
+`12tmb<suffix>.mid` under
+`OB12.vst3/Contents/x86_64-win/rom/presets`, with suffix length 2-8.
+Files like `12prgVA2.mid` are supported. **Add External Bank...** can
+load a different file pair; it is not needed for the six included banks.
+
+**Tests:** original-firmware Windows host audio, actual bank-switch flash
+write/readback, restoration of project memory, editor reload, three DLL
+unload/reload cycles and project recall are automated. Studio One 8
+practical acceptance and official Steinberg Validator remain open.
 
 **Build on Windows:** install Visual Studio 2022 LLVM support, Python 3 and Steinberg VST3
 SDK 3.7.12; set \`OB12_VST3SDK\`; supply your **own** original firmware in \`rom/\`; then run
