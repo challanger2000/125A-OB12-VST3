@@ -129,7 +129,7 @@ static bool test_scale(IComponent* component, MemoryState* saved) {
     const bool editor_height_ok = sized_child &&
         corrected_height.getHeight() == size.getHeight() &&
         sized_rect.bottom == size.getHeight();
-    printf("EDITOR_RELOAD_HEIGHT_TEST=%s host_height=%d corrected=%d child=%ld\\n",
+    printf("EDITOR_RELOAD_HEIGHT_TEST=%s host_height=%d corrected=%d child=%ld\n",
         editor_height_ok ? "PASS" : "FAIL",
         wrong_height.getHeight(), corrected_height.getHeight(), sized_rect.bottom);
     bool state_open_editor_ok = (saved == nullptr);
