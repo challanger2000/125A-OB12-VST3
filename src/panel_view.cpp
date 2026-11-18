@@ -132,28 +132,61 @@ struct PanelView::Impl {
 
     void load(const std::string& path) {
         std::ifstream f(path, std::ios::binary);
-        std::vector<char> data((std::istreambuf_iterator<char>(f)), {});
-        if (data.size() < 16 || memcmp(data.data(), "OB12", 4)) return;
+        if (!f) return;
+        f.seekg(0, std::ios::end);
+        const auto length = f.tellg();
+        if (length < 16 || length > (32LL << 20)) return;
+        f.seekg(0);
+        std::vector<char> data((size_t)length);
+        if (!f.read(data.data(), length) || memcmp(data.data(), "OB12", 4))
+            return;
         const char* p = data.data() + 4;
-        auto u32 = [&]() { uint32_t v; memcpy(&v, p, 4); p += 4; return v; };
-        auto f32 = [&]() { float v; memcpy(&v, p, 4); p += 4; return v; };
-        uint32_t count = u32();
-        art_w = f32();
-        art_h = f32();
-        runs.resize(count);
-        for (auto& r : runs) {
-            r.argb = u32();
-            r.mode = (uint8_t)*p++;
-            r.width = f32();
-            uint32_t commands = u32();
-            r.kinds.reserve(commands);
-            for (uint32_t i = 0; i < commands; i++) {
-                uint8_t kind = (uint8_t)*p++;
-                r.kinds.push_back(kind);
+        const char* end = data.data() + data.size();
+        auto get = [&](void* destination, size_t n) {
+            if ((size_t)(end - p) < n) return false;
+            memcpy(destination, p, n);
+            p += n;
+            return true;
+        };
+        uint32_t count = 0;
+        float new_w = 0, new_h = 0;
+        if (!get(&count, 4) || !get(&new_w, 4) || !get(&new_h, 4) ||
+            !std::isfinite(new_w) || !std::isfinite(new_h) ||
+            new_w < 8.f || new_w > 8192.f ||
+            new_h < 8.f || new_h > 8192.f ||
+            count == 0 || count > 65536u ||
+            (size_t)count > (size_t)(end - p) / 13)
+            return;
+        std::vector<Run> parsed;
+        parsed.reserve(count);
+        for (uint32_t r = 0; r < count; ++r) {
+            Run item;
+            uint8_t mode = 0;
+            uint32_t commands = 0;
+            if (!get(&item.argb, 4) || !get(&mode, 1) ||
+                !get(&item.width, 4) || !get(&commands, 4) ||
+                mode > 5 || !std::isfinite(item.width) ||
+                commands > (size_t)(end - p) ||
+                commands > 1000000u) return;
+            item.mode = mode;
+            item.kinds.reserve(commands);
+            for (uint32_t i = 0; i < commands; ++i) {
+                uint8_t kind = 0;
+                if (!get(&kind, 1) || kind > 3) return;
+                item.kinds.push_back(kind);
                 int n = kind == 2 ? 3 : kind == 3 ? 0 : 1;
-                for (int j = 0; j < n * 2; j++) r.points.push_back(f32());
+                for (int j = 0; j < n * 2; ++j) {
+                    float value = 0;
+                    if (!get(&value, 4) || !std::isfinite(value)) return;
+                    item.points.push_back(value);
+                }
             }
+            parsed.push_back(std::move(item));
         }
+        // Commit only once the complete art has been validated.
+        art_w = new_w;
+        art_h = new_h;
+        runs.swap(parsed);
         fix_art();
     }
 

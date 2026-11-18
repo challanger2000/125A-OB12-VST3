@@ -252,16 +252,37 @@ struct Engine::Impl {
         else { start = offset & 0xf0000; size = 0x10000; }
     }
     void load_flash() {
+        // Legacy flash files are untrusted external inputs. Parse into a separate
+        // 1 MiB image and only commit a completely valid stream; a truncated
+        // sector or a 32-bit offset+length wrap must NEVER touch the live Master.
+        if (flash_path.empty()) return;
         std::ifstream f(flash_path, std::ios::binary);
         char magic[8];
         if (!f.read(magic, 8) || memcmp(magic, "OB12FLSH", 8)) return;
-        uint32_t start, size;
-        while (f.read((char*)&start, 4) && f.read((char*)&size, 4)) {
-            if (start + size > m->flash.size()) break;
+        std::vector<u8> staged = m->flash;
+        std::vector<u8> seen(staged.size(), 0);
+        bool found = false;
+        for (;;) {
+            uint32_t start = 0, size = 0;
+            if (!f.read((char*)&start, 4)) {
+                if (!f.eof() || f.gcount() != 0) return; // partial record
+                break; // complete file: EOF precisely at a record boundary
+            }
+            if (!f.read((char*)&size, 4)) return;
+            // Subtraction avoids the old exploitable 32-bit addition overflow.
+            if (!size || start >= staged.size() || size > staged.size() - start)
+                return;
+            // All sectors are written once by save_flash(). Reject overlapping
+            // or duplicate records instead of silently letting the last one win.
+            for (size_t i = start; i < (size_t)start + size; ++i)
+                if (seen[i]) return;
             std::vector<char> data(size);
-            if (!f.read(data.data(), size)) break;
-            memcpy(m->flash.data() + start, data.data(), size);
+            if (!f.read(data.data(), size)) return;
+            memcpy(staged.data() + start, data.data(), size);
+            std::fill(seen.begin() + start, seen.begin() + start + size, 1);
+            found = true;
         }
+        if (found) m->flash.swap(staged);
     }
     void save_flash() {
         if (flash_path.empty()) return;
