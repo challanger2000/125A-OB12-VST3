@@ -10,6 +10,8 @@
 #include "pluginterfaces/vst/ivstparameterchanges.h"
 #include "pluginterfaces/vst/ivstmidicontrollers.h"
 #include <fstream>
+#include <cstring>
+#include "pluginterfaces/base/ibstream.h"
 #include "pluginterfaces/gui/iplugview.h"
 #include <algorithm>
 #include <cmath>
@@ -17,6 +19,44 @@
 #include <vector>
 using namespace Steinberg;
 using namespace Steinberg::Vst;
+
+struct MemoryState final : IBStream {
+    std::vector<uint8_t> storage;
+    size_t pos = 0;
+    tresult PLUGIN_API queryInterface(const TUID, void** out) override { if (out) *out = nullptr; return kNoInterface; }
+    uint32 PLUGIN_API addRef() override { return 1; }
+    uint32 PLUGIN_API release() override { return 1; }
+    tresult PLUGIN_API read(void* dst, int32 count, int32* done = nullptr) override {
+        if (!dst || count < 0) return kInvalidArgument;
+        size_t n = std::min((size_t)count, storage.size() - std::min(pos,storage.size()));
+        if (n) memcpy(dst,storage.data()+pos,n);
+        pos += n;
+        if (done) *done = (int32)n;
+        return kResultOk;
+    }
+    tresult PLUGIN_API write(void* src, int32 count, int32* done = nullptr) override {
+        if (!src || count < 0 || (size_t)count > (2u << 20) || pos > (2u << 20) - (size_t)count)
+            return kInvalidArgument;
+        if (pos + count > storage.size()) storage.resize(pos + count);
+        memcpy(storage.data()+pos,src,(size_t)count);
+        pos += (size_t)count;
+        if (done) *done = count;
+        return kResultOk;
+    }
+    tresult PLUGIN_API seek(int64 offset,int32 mode,int64* result=nullptr) override {
+        int64 base = mode == kIBSeekSet ? 0 : mode == kIBSeekCur ? (int64)pos :
+                     mode == kIBSeekEnd ? (int64)storage.size() : -1;
+        if (base < 0 || offset < -base || base + offset > (2LL << 20)) return kInvalidArgument;
+        pos=(size_t)(base + offset);
+        if (result) *result = (int64)pos;
+        return kResultOk;
+    }
+    tresult PLUGIN_API tell(int64* result) override {
+        if (!result) return kInvalidArgument;
+        *result=(int64)pos;
+        return kResultOk;
+    }
+};
 
 struct Events final : IEventList {
     std::vector<Event> list;
@@ -64,7 +104,7 @@ struct Frame final : IPlugFrame {
     }
 };
 
-static bool test_scale(IComponent* component) {
+static bool test_scale(IComponent* component, MemoryState* saved) {
     IEditController* controller = nullptr;
     component->queryInterface(IEditController::iid, (void**)&controller);
     IPlugView* view = controller->createView(ViewType::kEditor);
@@ -75,6 +115,12 @@ static bool test_scale(IComponent* component) {
     Frame frame;
     view->setFrame(&frame);
     view->attached(parent, kPlatformTypeHWND);
+    bool state_open_editor_ok = false;
+    if (saved && !saved->storage.empty()) {
+        saved->pos = 0;
+        state_open_editor_ok = component->setState(saved) == kResultOk;
+    }
+    printf("PROJECT_RECALL_WITH_EDITOR=%s\n", state_open_editor_ok ? "PASS" : "FAIL");
     HWND child = FindWindowExW(parent, nullptr, nullptr, nullptr);
     for (int percent : {50, 67, 200, 100}) {
         frame.calls_back = percent != 67;
@@ -132,7 +178,7 @@ static bool test_scale(IComponent* component) {
     again->release();
     DestroyWindow(parent);
     controller->release();
-    return browser_ok;
+    return browser_ok && state_open_editor_ok;
 }
 
 int main(int, char** argv) {
@@ -234,10 +280,18 @@ int main(int, char** argv) {
     }
     const bool audio_ok = first_sound > 10.0 && first_sound < 17.0 && frames > 0 && sum / frames > 1e-9;
     printf("AUDIO_TEST=%s\n", audio_ok ? "PASS" : "FAIL");
-    const bool browser_ok = test_scale(component);
+    MemoryState state;
+    const tresult state_result = component->getState(&state);
+    bool state_ok = state_result == kResultOk && state.storage.size() == 0x100000 + 24;
+    if (state_ok) {
+        state.pos = 0;
+        state_ok = component->setState(&state) == kResultOk;
+    }
+    printf("PROJECT_STATE_TEST=%s bytes=%zu\n", state_ok ? "PASS" : "FAIL", state.storage.size());
+    const bool browser_ok = test_scale(component, &state);
     audio->setProcessing(false);
     component->setActive(false);
     component->terminate();
     component->release();
-    return audio_ok && browser_ok ? 0 : 2;
+    return audio_ok && state_ok && browser_ok ? 0 : 2;
 }
