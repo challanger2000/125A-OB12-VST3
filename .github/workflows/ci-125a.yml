@@ -45,6 +45,6 @@ jobs:
           if errorlevel 1 exit /b 1
           clang-cl /nologo /EHsc /std:c++17 /Ivendor\vst3sdk /c tools\vst3_iids.cpp /Fobuild\vst3_iids.obj
           if errorlevel 1 exit /b 1
-          clang-cl /nologo /LD build\source-check-vst3.obj build\source-check-panel.obj build\source-check-engine.obj build\f2mc16.obj build\tms57070.obj build\coreiids.obj build\funknown.obj build\vstinitiids.obj build\vst3_iids.obj synchronization.lib d2d1.lib dwrite.lib windowscodecs.lib user32.lib ole32.lib comdlg32.lib winmm.lib /Fe:build\OB12.vst3
+          clang-cl /nologo /LD build\source-check-vst3.obj build\source-check-panel.obj build\source-check-engine.obj build\f2mc16.obj build\tms57070.obj build\coreiids.obj build\funknown.obj build\vstinitiids.obj build\vst3_iids.obj synchronization.lib d2d1.lib dwrite.lib windowscodecs.lib gdi32.lib user32.lib ole32.lib comdlg32.lib winmm.lib /Fe:build\OB12.vst3
           if errorlevel 1 exit /b 1
           if not exist build\OB12.vst3 exit /b 1
