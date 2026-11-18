@@ -337,20 +337,36 @@ private:
         fill();
     }
     static void enumerate_banks(const std::wstring& directory, std::vector<BankPair>& into) {
-        std::wstring mask = directory + L"\\12prg??.mid";
+        std::wstring mask = directory + L"\\12prg*.mid";
         WIN32_FIND_DATAW info = {};
         HANDLE search = FindFirstFileW(mask.c_str(), &info);
         if (search == INVALID_HANDLE_VALUE) return;
         do {
             if (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
             std::wstring program = info.cFileName;
-            if (program.size() != 11 || lower(program).substr(0, 5) != L"12prg" ||
-                lower(program).substr(7) != L".mid") continue;
-            std::wstring suffix = program.substr(5, 2);
+            std::wstring filename_lower = lower(program);
+            if (program.size() < 11 || program.size() > 17 ||
+                filename_lower.substr(0, 5) != L"12prg" ||
+                filename_lower.substr(program.size() - 4) != L".mid") continue;
+            const size_t suffix_len = program.size() - 9; // prefix length 5, suffix, .mid length 4
+            if (suffix_len < 2 || suffix_len > 8) continue;
+            std::wstring suffix = program.substr(5, suffix_len);
+            if (!std::all_of(suffix.begin(), suffix.end(), [](wchar_t c) {
+                    return iswalnum(c) != 0 || c == L'_';
+                })) continue;
             std::wstring timbre = L"12tmb" + suffix + L".mid";
             std::wstring timbre_path = directory + L"\\" + timbre;
             if (GetFileAttributesW(timbre_path.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
-            BankPair pair{suffix + L" — " + directory, directory + L"\\" + program, timbre_path};
+            std::wstring id = lower(suffix);
+            std::wstring title = suffix;
+            if (id == L"fs") title = L"Factory Presets (Viscount)";
+            else if (id == L"jr") title = L"JR Sounds";
+            else if (id == L"va2") title = L"Virtual Analog 2 (VA2)";
+            else if (id == L"jx1") title = L"Jexus / WC Olo Garb — Set 1";
+            else if (id == L"jx2") title = L"Jexus / WC Olo Garb — Set 2";
+            else if (id == L"sp") title = L"Syntpelle — 39 Patches (Bank B)";
+            else if (id == L"ip") title = L"Individual POB / TOB Patches";
+            BankPair pair{title + L" — " + directory, directory + L"\\" + program, timbre_path};
             bool duplicate = false;
             for (const BankPair& old : into)
                 if (lower(old.program_path) == lower(pair.program_path)) duplicate = true;

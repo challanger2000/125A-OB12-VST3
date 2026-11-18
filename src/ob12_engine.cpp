@@ -613,11 +613,19 @@ std::string Engine::decode_bank(const std::vector<uint8_t>& input,
                 return "Incomplete or oversized OB-12 bank data";
             image.insert(image.end(), decoded.begin(), decoded.begin() + count);
             next += (uint32_t)count;
-        } else if (cmd == 0x7e || cmd == 0x67 || cmd == 0x71 || cmd == 0x7a) {
+        } else if (cmd == 0x7b || cmd == 0x7c || cmd == 0x7e ||
+                   cmd == 0x67 || cmd == 0x71 || cmd == 0x7a ||
+                   cmd == 0x6d || cmd == 0x6e) {
             uint32_t declared = 0;
             if (!parse_hex5(at + 5, declared) || declared != image.size())
                 return "OB-12 bank-size trailer mismatch";
             ended = true;
+        } else if (cmd == 0x04 && !have_data) {
+            // The original VA2 MIDI bank has a short Viscount setup command
+            // preceding its 68 start markers. It does not carry sound data.
+            if (end - at != 9 || input[at + 5] != 0 ||
+                input[at + 6] != 0x44 || input[at + 7] != 1)
+                return "Unsupported OB-12 bank setup record";
         } else if (cmd != 0x68 && cmd != 0x6f && cmd != 0x70 && cmd != 0x7d) {
             return "Unexpected command in OB-12 bank stream";
         }

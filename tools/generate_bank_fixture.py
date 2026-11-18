@@ -40,7 +40,7 @@ def midi_bank(image: bytes, base: int, label: str) -> bytes:
     # Authentic factory bank layout, original full image only.
     assert label in ("PROGRAM", "TIMBRE")
     assert (base, len(image)) in ((0xD0000, 40448), (0xC0000, 42752))
-    events = [syx(0x68), syx(0x68),
+    events = ([syx(0x04, b"\x00\x44\x01")] if getattr(midi_bank, "va2", False) else []) + [syx(0x68), syx(0x68),
               syx(0x6F, f". Updating Sect.[{label}] .".encode("ascii")),
               syx(0x70, b"> From dump OB 12 <")]
     cursor = base
@@ -49,7 +49,8 @@ def midi_bank(image: bytes, base: int, label: str) -> bytes:
         events.append(syx(0x7F, f"{cursor:05X}".encode("ascii") +
                           bytes((len(chunk),)) + pack_7_1(chunk)))
         cursor += len(chunk)
-    events.append(syx(0x7E, f"{len(image):05X}".encode("ascii")))  # section end
+    events.append(syx(0x7B if label=="PROGRAM" else 0x7C,
+                      f"{len(image):05X}".encode("ascii")))  # original Program/Timbre section end
     events.append(syx(0x7D))
     # Standard MIDI format 0. Send 10ms between records in the synthetic test
     # to reduce CI runtime. The hardware-compatible loader itself still sends
@@ -70,6 +71,7 @@ def main():
     if len(suffix)!=2 or not suffix.isalnum():
         sys.exit("suffix must be two ASCII alphanumeric characters")
     target.mkdir(parents=True,exist_ok=True)
+    midi_bank.va2 = suffix.upper() == "VA2"
     for kind,base,nbytes,label in (("prg",0xD0000,40448,"PROGRAM"),
                                    ("tmb",0xC0000,42752,"TIMBRE")):
         source=rom/f"12{kind}FS.bin"

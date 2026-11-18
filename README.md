@@ -4,9 +4,10 @@ This repository is a derivative of [Tuth/ob12-emu](https://github.com/Tuth/ob12-
 It adds a native searchable **Program/Timbre Preset Browser**, paired \`12prgXX.mid\` /
 \`12tmbXX.mid\` import, and preliminary **per-DAW-project flash-state recall**.
 
-**Status:** Windows source compilation and full VST3 linking (without firmware) have passed in CI. Firmware-backed
-sound test, Steinberg validator run and Studio One acceptance are still outstanding.
-Do not replace a working original OB12.vst3 with this branch before those tests.
+**Status:** Original-firmware audio, native browser, per-project flash recall, and an
+original-format 256-Program/256-Timbre bank-install integration test have passed on Windows CI.
+The Steinberg Validator and Studio One practical acceptance remain outstanding; keep a backup
+of your working plug-in before installing this development build.
 
 **Open browser:** right-click the existing OB-12 hardware panel and select **Preset Browser...**.
 Use Programs/Timbres + Bank A/B; click a slot to send the documented MIDI bank select / program change.
