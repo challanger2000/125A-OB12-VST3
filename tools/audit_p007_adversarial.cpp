@@ -1,0 +1,75 @@
+// Targeted audit-only executable, NOT part of the shipping VST3.
+// Tests a requirement independently from the GUI/Engine implementation:
+// "Reset memory to factory" must genuinely reset private project flash,
+// not only drop a legacy shared-file path and preserve the mutated patch.
+//
+// This deliberately returns non-zero while the product violates the contract.
+// A RED audit CI job is evidence of the defect, not a failed source compilation.
+#include "ob12_engine.h"
+#include <algorithm>
+#include <cstdio>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+int main(int argc, char** argv) {
+    if (argc != 2) { std::puts("usage: audit_p007_adversarial <rom>"); return 2; }
+    Engine e{std::string(argv[1])};
+    e.detach_flash_file();
+    std::vector<uint8_t> baseline;
+    if (!e.snapshot_flash(baseline) || baseline.size() != 0x100000) {
+        std::puts("AUDIT_PRECONDITION=FAIL baseline flash unavailable");
+        return 3;
+    }
+
+    std::vector<uint8_t> programs(baseline.begin()+0xD0000,
+                                  baseline.begin()+0xD0000+40448);
+    std::vector<uint8_t> timbres(baseline.begin()+0xC0000,
+                                 baseline.begin()+0xC0000+42752);
+    const uint8_t original = programs[3];
+    programs[3] ^= 0x7f; // one observable byte change; don't need musical fixtures
+    if (!e.apply_bank_pair(programs,timbres)) {
+        std::puts("AUDIT_PRECONDITION=FAIL could not load modified private bank");
+        return 4;
+    }
+    std::vector<uint8_t> changed;
+    if (!e.snapshot_flash(changed) || changed.size()!=baseline.size() ||
+        changed[0xD0003] == original || changed[0xD0003] != programs[3]) {
+        std::puts("AUDIT_PRECONDITION=FAIL mutation was not committed to flash");
+        return 5;
+    }
+    // This is exactly what PanelView::reset_memory invokes after the user
+    // presses OK. Run the original CPU input loop for >1 ms so the queued
+    // flag is definitely processed before snapshotting.
+    e.forget_flash();
+    std::vector<int32_t> audio(240*2);
+    e.run(audio.data(), 240);
+    std::vector<uint8_t> reset;
+    if (!e.snapshot_flash(reset)) return 6;
+    const bool restored = reset == baseline;
+    const bool still_mutated = reset[0xD0003] == programs[3];
+    std::printf("AUDIT_FACTORY_RESET_EXPECTED=%02X ACTUAL=%02X "
+                "RESTORED=%d STILL_MUTATED=%d\n",
+                (unsigned)original,(unsigned)reset[0xD0003],
+                (int)restored,(int)still_mutated);
+    // Control: engine reload CAN actually restore the original snapshot.
+    // Thus the oracle detects a real flash mutation and a working restoration.
+    const bool explicit_restore = e.reload(argv[1], baseline);
+    std::vector<uint8_t> restored_control;
+    const bool control_pass = explicit_restore &&
+        e.snapshot_flash(restored_control) && restored_control==baseline;
+    std::printf("AUDIT_POSITIVE_RESTORE_CONTROL=%s\n",
+                control_pass ? "PASS" : "FAIL");
+    if (!control_pass) return 7;
+    if (!restored && still_mutated) {
+        std::puts("AUDIT_CONTRACT_RESET_MEMORY=FAIL "
+                  "command does not restore factory data in private flash");
+        return 9;
+    }
+    if (!restored) {
+        std::puts("AUDIT_CONTRACT_RESET_MEMORY=FAIL changed but nonfactory flash");
+        return 10;
+    }
+    std::puts("AUDIT_CONTRACT_RESET_MEMORY=PASS");
+    return 0;
+}
