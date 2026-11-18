@@ -79,6 +79,9 @@ private:
     int selected_key_ = -1;
     bool names_live_ = false, observed_ready_ = false;
     long last_index_writes_ = -1;
+    bool transferring_ = false;
+    ULONGLONG transfer_started_ = 0, last_flash_activity_ = 0;
+    long first_transfer_writes_ = 0, observed_transfer_writes_ = 0;
 
     static std::wstring wide(const std::string& text) {
         if (text.empty()) return {};
@@ -297,6 +300,10 @@ private:
         InvalidateRect(list_, nullptr, TRUE);
     }
     void select_current() {
+        if (transferring_) {
+            text_status(L"Soundbank transfer in progress. Preset selection is temporarily disabled.");
+            return;
+        }
         LRESULT row = SendMessageW(list_, LB_GETCURSEL, 0, 0);
         if (row == LB_ERR) return;
         LRESULT slot = SendMessageW(list_, LB_GETITEMDATA, (WPARAM)row, 0);
@@ -360,6 +367,10 @@ private:
         }
     }
     void import_bank() {
+        if (transferring_ || engine_.sysex_waiting() > 0) {
+            text_status(L"A soundbank transfer is already in progress.");
+            return;
+        }
         std::wstring program_file, timbre_file;
         int chosen_pair = library_ ? (int)SendMessageW(library_, CB_GETCURSEL, 0, 0) - 1 : -1;
         if (chosen_pair >= 0 && chosen_pair < (int)bank_pairs_.size()) {
@@ -416,15 +427,14 @@ private:
              L"Confirm OB-12 bank import", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES)
             return;
 
-        // Timbres first, then the Programs which reference them.
+        // Timbres first, then the Programs which reference them. Do not show the
+        // imported names until the original firmware has really written its flash.
+        first_transfer_writes_ = observed_transfer_writes_ = engine_.flash_writes();
+        transfer_started_ = last_flash_activity_ = GetTickCount64();
+        transferring_ = true;
         if (!timbres.empty()) engine_.send_sysex(timbres.data(), (int)timbres.size());
         if (!programs.empty()) engine_.send_sysex(programs.data(), (int)programs.size());
-
-        std::vector<unsigned char> image;
-        if (!timbres.empty() && decode_bank(timbres, image)) scan_names(1, image);
-        if (!programs.empty() && decode_bank(programs, image)) scan_names(0, image);
-        fill();
-        text_status(L"Bank import queued. Wait for MIDI transfer to complete before browsing.");
+        text_status(L"Transferring original-format Program/Timbre bank; preset selection locked.");
     }
     void create_widgets() {
         HINSTANCE inst = GetModuleHandleW(nullptr);
@@ -514,12 +524,27 @@ private:
             break;
         case WM_TIMER: {
             int waiting = self->engine_.sysex_waiting();
-            if (waiting == 0) self->sync_live_names();
-            if (waiting) {
-                wchar_t text[100];
-                swprintf(text, 100, L"SysEx import: %d messages pending", waiting);
-                self->text_status(text);
-            }
+            const ULONGLONG now = GetTickCount64();
+            if (self->transferring_) {
+                const long writes = self->engine_.flash_writes();
+                if (writes != self->observed_transfer_writes_) {
+                    self->observed_transfer_writes_ = writes;
+                    self->last_flash_activity_ = now;
+                }
+                if (waiting == 0 && now - self->transfer_started_ > 1500 &&
+                    now - self->last_flash_activity_ >= 2000) {
+                    self->transferring_ = false;
+                    self->last_index_writes_ = -1;
+                    self->sync_live_names();
+                    self->text_status(writes > self->first_transfer_writes_
+                        ? L"Soundbank transfer finished; current emulated flash names refreshed."
+                        : L"Transfer queue ended, but no firmware flash writes were observed.");
+                } else {
+                    wchar_t text[128] = {};
+                    swprintf(text, 128, L"Transferring SysEx: %d messages pending. Do not change presets.", waiting);
+                    self->text_status(text);
+                }
+            } else if (waiting == 0) self->sync_live_names();
             return 0;
         }
         case WM_CTLCOLORSTATIC:
