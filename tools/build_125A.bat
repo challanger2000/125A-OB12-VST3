@@ -19,7 +19,7 @@ if not exist "rom\dsp" (
   exit /b 2
 )
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
-if exist "%VSWHERE%" for /f "usebackq delims=" %%I in ("%VSWHERE%" -latest -property installationPath) do set "VS_HOME=%%I"
+if exist "%VSWHERE%" for /f "usebackq delims=" %%I in (`"%VSWHERE%" -latest -property installationPath`) do set "VS_HOME=%%I"
 if defined VS_HOME if exist "%VS_HOME%\VC\Auxiliary\Build\vcvars64.bat" call "%VS_HOME%\VC\Auxiliary\Build\vcvars64.bat" >nul
 if not defined OB12_CC if defined VS_HOME if exist "%VS_HOME%\VC\Tools\Llvm\x64\bin\clang-cl.exe" set "OB12_CC=%VS_HOME%\VC\Tools\Llvm\x64\bin\clang-cl.exe"
 if not defined OB12_CC set "OB12_CC=clang-cl.exe"
