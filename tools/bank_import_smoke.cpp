@@ -76,8 +76,19 @@ int main(int argc,char** argv) {
     }
     std::vector<uint8_t> after;
     if(!e.snapshot_flash(after)||after.size()!=0x100000) return 6;
-    const bool tmb_ok=std::equal(expected_tmb.begin(),expected_tmb.end(),after.begin()+0xC0000);
-    const bool prg_ok=std::equal(expected_prg.begin(),expected_prg.end(),after.begin()+0xD0000);
+    auto compare = [&](const std::vector<uint8_t>& expected, size_t offset, const char* label) {
+        size_t diffs = 0;
+        size_t first = 0;
+        for (size_t i=0;i<expected.size();i++) if (expected[i]!=after[offset+i]) {
+            if (!diffs) first=i;
+            ++diffs;
+        }
+        printf("FLASH_COMPARE_%s diff=%zu first=0x%zx expected=%02X got=%02X, before=%02X\n",
+               label,diffs,first,expected[first],after[offset+first],before[offset+first]);
+        return diffs == 0;
+    };
+    const bool tmb_ok=compare(expected_tmb,0xC0000,"TIMBRE");
+    const bool prg_ok=compare(expected_prg,0xD0000,"PROGRAM");
     long writes=e.flash_writes()-baseline;
     const bool success=seen_pending&&drained&&e.sounding_ready()&&
                        writes>=40000&&tmb_ok&&prg_ok;
