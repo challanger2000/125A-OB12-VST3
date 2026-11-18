@@ -410,12 +410,12 @@ private:
             if (GetFileAttributesW(timbre_path.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
             std::wstring id = lower(suffix);
             std::wstring title = suffix;
-            if (id == L"fs") title = L"Factory Presets (Viscount)";
+            if (id == L"fs") title = L"Factory (Viscount)";
             else if (id == L"jr") title = L"JR Sounds";
-            else if (id == L"va2") title = L"Virtual Analog 2 (VA2)";
-            else if (id == L"jx1") title = L"Jexus / WC Olo Garb — Set 1";
-            else if (id == L"jx2") title = L"Jexus / WC Olo Garb — Set 2";
-            else if (id == L"sp") title = L"Syntpelle — 39 Patches (Bank B)";
+            else if (id == L"va2") title = L"VA2 - Virtual Analog 2";
+            else if (id == L"jx1") title = L"Jexus 1 (WC Olo Garb)";
+            else if (id == L"jx2") title = L"Jexus 2 (WC Olo Garb)";
+            else if (id == L"sp") title = L"Syntpelle (39 patches)";
             else if (id == L"ip") title = L"Individual POB / TOB Patches";
             BankPair pair{title, directory + L"\\" + program, timbre_path};
             bool duplicate = false;
