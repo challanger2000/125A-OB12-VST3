@@ -235,6 +235,10 @@ struct Engine::Impl {
     // The unit's memory: see set_flash_file in ob12_engine.h.
     std::string flash_path;
     std::vector<u8> factory; // pristine original ROM image, never overwritten by a DAW project
+    // A bank selected during the original machine's ~12-second boot must survive
+    // firmware initialization and be serialized correctly even before it is ready.
+    std::vector<u8> boot_programs, boot_timbres;
+    bool boot_factory_reset = false;
     long manual_flash_changes = 0; // bank installations and factory restore are not firmware writes
     long flash_seen = 0, flash_changed_at = 0;
     bool flash_dirty = false;
@@ -361,7 +365,25 @@ struct Engine::Impl {
         auto& su = s->link();
         for (; m_sent < mu.head.size(); m_sent++) su.rx_queue.push_back(mu.head[m_sent]);
         for (; s_sent < su.head.size(); s_sent++) mu.rx_queue.push_back(su.head[s_sent]);
-        if (s_sent >= 18 && !ready_at) { ready_at = k; ready.store(true, std::memory_order_relaxed); }
+        if (s_sent >= 18 && !ready_at) {
+            // Finalize any library chosen while the original CPU/Slave were
+            // booting BEFORE exposing the ready flag / MIDI preset recall.
+            // Otherwise startup firmware writes could replace the new bank.
+            if (boot_factory_reset) {
+                std::copy(factory.begin(), factory.end(), m->flash.begin());
+                boot_factory_reset = false;
+            } else if (boot_programs.size() == 40448 &&
+                       boot_timbres.size() == 42752) {
+                std::copy(boot_timbres.begin(), boot_timbres.end(),
+                          m->flash.begin() + 0xC0000);
+                std::copy(boot_programs.begin(), boot_programs.end(),
+                          m->flash.begin() + 0xD0000);
+            }
+            boot_programs.clear();
+            boot_timbres.clear();
+            ready_at = k;
+            ready.store(true, std::memory_order_release);
+        }
         k++;
     }
 
@@ -658,10 +680,25 @@ bool Engine::apply_bank_pair(const std::vector<uint8_t>& programs,
                              const std::vector<uint8_t>& timbres) {
     if (programs.size() != 40448 || timbres.size() != 42752) return false;
     Impl& e = *impl;
-    // Prevent interference with the original firmware's own UART update mode.
-    if (e.sysex_left.load(std::memory_order_relaxed) != 0) return false;
+    // Lock order matches Engine::run -> take_inputs: run_lock before input_lock.
+    // sysex_left alone misses SysEx queued by the GUI before the next CPU tick.
     std::lock_guard<std::mutex> running(e.run_lock);
-    if (e.m->flash.size() != 0x100000) return false;
+    std::lock_guard<std::mutex> incoming(e.input_lock);
+    if (e.sysex_left.load(std::memory_order_acquire) != 0 ||
+        !e.pending_sysex.empty() || !e.sysex_queue.empty() ||
+        e.m->flash.size() != 0x100000) return false;
+    if (!e.ready.load(std::memory_order_acquire)) {
+        // Use local copies before mutating flash so a failed allocation cannot
+        // publish half of the intended pending Program/Timbre pair.
+        auto staged_programs = programs, staged_timbres = timbres;
+        e.boot_programs.swap(staged_programs);
+        e.boot_timbres.swap(staged_timbres);
+        e.boot_factory_reset = false;
+    } else {
+        e.boot_programs.clear();
+        e.boot_timbres.clear();
+        e.boot_factory_reset = false;
+    }
     std::copy(timbres.begin(), timbres.end(), e.m->flash.begin() + 0xC0000);
     std::copy(programs.begin(), programs.end(), e.m->flash.begin() + 0xD0000);
     e.flash_dirty = true;
@@ -682,6 +719,17 @@ bool Engine::snapshot_flash(std::vector<uint8_t>& bytes) {
     // lock. Capture directly even while the feeder is paused.
     std::lock_guard<std::mutex> running(e.run_lock);
     bytes = e.m->flash;
+    if (e.boot_factory_reset && e.factory.size() == bytes.size()) {
+        bytes = e.factory;
+    } else if (e.boot_programs.size() == 40448 &&
+               e.boot_timbres.size() == 42752 && bytes.size() == 0x100000) {
+        // Serialize the bank the USER selected, even while firmware boot
+        // has not yet consumed and finalized it.
+        std::copy(e.boot_timbres.begin(), e.boot_timbres.end(),
+                  bytes.begin() + 0xC0000);
+        std::copy(e.boot_programs.begin(), e.boot_programs.end(),
+                  bytes.begin() + 0xD0000);
+    }
     return bytes.size() == 0x100000;
 }
 
@@ -750,7 +798,10 @@ bool Engine::forget_flash() {
         return false; // do not overwrite a firmware update mid-transfer
     // Preserve the original CPU/DSP state; the next preset selection will read
     // the genuine factory parameters. This does not rewrite legacy global files.
-    e.m->flash = e.factory;
+    std::copy(e.factory.begin(), e.factory.end(), e.m->flash.begin());
+    e.boot_programs.clear();
+    e.boot_timbres.clear();
+    e.boot_factory_reset = !e.ready.load(std::memory_order_acquire);
     e.flash_path.clear();
     e.flash_dirty = false;
     e.flash_seen = e.m->flash_erases + e.m->flash_programs;

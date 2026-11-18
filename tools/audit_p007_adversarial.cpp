@@ -84,5 +84,47 @@ int main(int argc, char** argv) {
                 "flash_unchanged=%d\n",
                 rejected && intact ? "PASS" : "FAIL",
                 (int)rejected,(int)intact);
-    return rejected && intact ? 0 : 11;
+    if (!rejected || !intact) return 11;
+
+    // Independent boot-race oracle: a genuine non-Factory patch in the flash
+    // must survive the original firmware's startup, not just snapshot correctly
+    // before the first 12 seconds of original CPU execution.
+    Engine cold{std::string(argv[1])};
+    cold.detach_flash_file();
+    const bool staged = cold.apply_bank_pair(programs, timbres);
+    std::vector<uint8_t> staged_state;
+    const bool staged_saved = cold.snapshot_flash(staged_state) &&
+        staged_state.size() == baseline.size() &&
+        staged_state[0xD0003] == programs[3];
+    if (!staged || !staged_saved) {
+        std::puts("AUDIT_PREBOOT_BANK=FAIL not persisted before CPU boot");
+        return 12;
+    }
+    std::vector<int32_t> audio(240*2);
+    for (int i = 0; i < 13*200; ++i) cold.run(audio.data(), 240);
+    std::vector<uint8_t> after_boot;
+    const bool boot_ok = cold.sounding_ready() &&
+        cold.snapshot_flash(after_boot) &&
+        after_boot.size() == baseline.size() &&
+        after_boot[0xD0003] == programs[3];
+    std::printf("AUDIT_PREBOOT_BANK_SURVIVAL=%s before=%02X after=%02X "
+                "factory=%02X ready=%d\n",
+                boot_ok ? "PASS" : "FAIL",(unsigned)programs[3],
+                after_boot.size() == baseline.size() ?
+                  (unsigned)after_boot[0xD0003] : 0u,
+                (unsigned)baseline[0xD0003],(int)cold.sounding_ready());
+    if (!boot_ok) return 13;
+
+    // A queued original SysEx transmission must reject an external
+    // direct-install operation atomically, not only reject factory reset.
+    std::vector<uint8_t> before_rejected_install;
+    if (!e.snapshot_flash(before_rejected_install)) return 14;
+    const bool install_rejected = !e.apply_bank_pair(programs, timbres);
+    std::vector<uint8_t> after_rejected_install;
+    const bool install_intact = e.snapshot_flash(after_rejected_install) &&
+        before_rejected_install == after_rejected_install;
+    std::printf("AUDIT_BANK_SWITCH_WHILE_SYSEX=%s request_rejected=%d intact=%d\n",
+                install_rejected && install_intact ? "PASS" : "FAIL",
+                (int)install_rejected,(int)install_intact);
+    return install_rejected && install_intact ? 0 : 15;
 }

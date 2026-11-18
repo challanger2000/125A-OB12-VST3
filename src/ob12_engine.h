@@ -29,6 +29,8 @@ public:
     bool restore_flash(const std::vector<uint8_t>& bytes); // call before engine audio starts
     // Safe modern bank loading: validate original Viscount update streams, then
     // stage verified 256-preset binary images in this instance's private flash.
+    // Selections made during firmware boot remain pending until the Slave is ready,
+    // and pending banks are included in the DAW state snapshot.
     static std::string decode_bank(const std::vector<uint8_t>& sysex,
                                    std::vector<uint8_t>& image, uint32_t& flash_offset);
     bool apply_bank_pair(const std::vector<uint8_t>& programs,
