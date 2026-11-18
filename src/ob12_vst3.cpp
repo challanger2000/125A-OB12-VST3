@@ -383,8 +383,13 @@ public:
     tresult PLUGIN_API initialize(FUnknown*) override { trace("plugin %p initialize", this); return kResultOk; }
     tresult PLUGIN_API terminate() override {
         trace("plugin %p terminate", this);
-        std::lock_guard<std::mutex> hold(instrument_lock);
-        instrument.reset();
+        reloading.store(true, std::memory_order_release);
+        while (active_callbacks.load(std::memory_order_acquire)) Sleep(1);
+        {
+            std::lock_guard<std::mutex> hold(instrument_lock);
+            instrument.reset();
+        }
+        reloading.store(false, std::memory_order_release);
         return kResultOk;
     }
 
@@ -429,14 +434,19 @@ public:
             project_checksum(image) != header.checksum) return kResultFalse;
 
         if (header.selected_preset < -1 || header.selected_preset >= 512) return kResultFalse;
-        std::lock_guard<std::mutex> hold(instrument_lock);
-        project_flash = std::move(image);
-        project_preset = header.selected_preset;
-        // Keep the Instrument and Engine addresses stable: an open PanelView holds
-        // an Engine reference, so destroying the Instrument here would dangle it.
-        if (instrument && !instrument->reload_project(project_flash, project_preset))
-            return kResultFalse;
-        return kResultOk;
+        // Keep the DAW's audio callback out of the buffer/engine while reloading.
+        reloading.store(true, std::memory_order_release);
+        while (active_callbacks.load(std::memory_order_acquire)) Sleep(1);
+        bool ok = true;
+        {
+            std::lock_guard<std::mutex> hold(instrument_lock);
+            project_flash = std::move(image);
+            project_preset = header.selected_preset;
+            // Keep the Instrument and Engine addresses stable while the editor is open.
+            if (instrument) ok = instrument->reload_project(project_flash, project_preset);
+        }
+        reloading.store(false, std::memory_order_release);
+        return ok ? kResultOk : kResultFalse;
     }
     tresult PLUGIN_API getState(IBStream* stream) override {
         if (!stream) return kInvalidArgument;
@@ -486,7 +496,22 @@ public:
         return kResultTrue;
     }
 
+    static tresult quiet(ProcessData& data) {
+        if (data.numSamples > 0 && data.numOutputs > 0 && data.outputs) {
+            auto& out = data.outputs[0];
+            for (int c = 0; c < out.numChannels; ++c)
+                if (out.channelBuffers32 && out.channelBuffers32[c])
+                    memset(out.channelBuffers32[c], 0, (size_t)data.numSamples * sizeof(float));
+            out.silenceFlags = 3;
+        }
+        return kResultOk;
+    }
     tresult PLUGIN_API process(ProcessData& data) override {
+        if (reloading.load(std::memory_order_acquire)) return quiet(data);
+        active_callbacks.fetch_add(1, std::memory_order_acq_rel);
+        struct Finish { std::atomic<int>& counter; ~Finish() { counter.fetch_sub(1, std::memory_order_release); } };
+        Finish finish{active_callbacks};
+        if (reloading.load(std::memory_order_acquire)) return quiet(data);
         Instrument* inst = instrument.get();
         if (inst && inst->engine) {
             // Notes, pressure and controller changes go to the Master's MIDI input in sample order.
@@ -603,6 +628,8 @@ private:
     std::atomic<uint32> refs{1};
     Facet facet{*this};
     std::unique_ptr<Instrument> instrument;
+    std::atomic<bool> reloading{false};
+    std::atomic<int> active_callbacks{0};
     std::vector<uint8_t> project_flash; // exact serialized original memory
     int project_preset = -1;
     bool raw_channel_messages = false;  // the host sends channel messages as raw MIDI data events
