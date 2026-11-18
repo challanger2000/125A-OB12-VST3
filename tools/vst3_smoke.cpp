@@ -371,6 +371,8 @@ int main(int, char** argv) {
     char temp[MAX_PATH];
     GetTempPathA(MAX_PATH, temp);
     SetEnvironmentVariableA("LOCALAPPDATA", temp);  // keep the user's saved size out of this
+    const std::string probe_path=std::string(temp)+"\\p007-midi-offsets.txt";
+    SetEnvironmentVariableA("OB12_MIDI_PROBE", probe_path.c_str());
     // Test discovery of an external matching soundbank pair without writing to firmware.
     std::string user_library = std::string(temp) + "\\OB12";
     CreateDirectoryA(user_library.c_str(), nullptr);
@@ -549,12 +551,57 @@ int main(int, char** argv) {
                     ok ? "PASS" : "FAIL", (int)before, (int)after);
         return ok;
     }();
+    // A separate timed native MIDI ingress probe follows the ordinary VST3
+    // project and browser tests; it checks the true feeder's 48-kHz dispatch.
+    const bool timing_ok = [&]() -> bool {
+        events.list.clear();
+        changes.list.clear();
+        Event first{};
+        first.type=Event::kNoteOnEvent; first.sampleOffset=64;
+        first.noteOn.pitch=59; first.noteOn.velocity=0.7f;
+        Event second{};
+        second.type=Event::kNoteOnEvent; second.sampleOffset=320;
+        second.noteOn.pitch=61; second.noteOn.velocity=0.7f;
+        events.list.push_back(first); events.list.push_back(second);
+        bool calls = audio->process(data) == kResultOk;
+        events.list.clear();
+        for (int n=0;n<16;++n) {
+            calls = calls && audio->process(data)==kResultOk;
+            Sleep(4);
+        }
+        std::ifstream probe(probe_path);
+        unsigned long long targets[2]={}, actuals[2]={};
+        bool seen[2]={};
+        std::string line;
+        while (std::getline(probe,line)) {
+            unsigned long long target=0,actual=0;
+            unsigned status=0,pitch=0;
+            if (std::sscanf(line.c_str(),
+                  "P007_DISPATCH target=%llu actual=%llu status=%u pitch=%u",
+                  &target,&actual,&status,&pitch)!=4) continue;
+            const int slot = pitch==59 ? 0 : pitch==61 ? 1 : -1;
+            if (slot<0 || status!=0x90) continue;
+            targets[slot]=target; actuals[slot]=actual; seen[slot]=true;
+        }
+        const long long separation =
+            std::llround(320.0*48000.0/44100.0) -
+            std::llround(64.0*48000.0/44100.0);
+        const bool ok=calls && seen[0] && seen[1] &&
+            targets[0]==actuals[0] && targets[1]==actuals[1] &&
+            (long long)(actuals[1]-actuals[0])==separation;
+        std::printf("P007_MIDI_OFFSET_DISPATCH=%s diff=%lld expected=%lld\\n",
+                    ok?"PASS":"FAIL",
+                    seen[0]&&seen[1]?(long long)(actuals[1]-actuals[0]):-1LL,
+                    separation);
+        return ok;
+    }();
     audio->setProcessing(false);
     component->setActive(false);
     component->terminate();
     component->release();
     FreeLibrary(dll);
+    SetEnvironmentVariableA("OB12_MIDI_PROBE", nullptr);
     const bool reload_ok = test_second_plugin_instance(argv[1]);
     return audio_ok && preselect_browser_ok && state_ok && browser_ok &&
-           deferred_frame_ok && midi_bridge_ok && reload_ok ? 0 : 2;
+           deferred_frame_ok && midi_bridge_ok && timing_ok && reload_ok ? 0 : 2;
 }

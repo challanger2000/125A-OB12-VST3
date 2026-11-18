@@ -14,7 +14,9 @@ public:
     // Runs the machine until n frames at 48 kHz are out. 24 bit values, left and right interleaved.
     void run(int32_t* frames, int n);
 
-    void midi(const uint8_t* bytes, int count);          // into the Master's MIDI input  (31250 baud, a .syx whole)
+    void midi(const uint8_t* bytes, int count);          // UI/other non-realtime source
+    void observe_host_midi(const uint8_t* bytes, int count) noexcept; // realtime-safe preset mirror
+    void midi_deferred(const uint8_t* bytes, int count); // feeder thread only; not realtime safe
     void select_preset(bool program, int bank, int slot);  // MIDI bank select and program change; bank 0/1, slot 0..127
     int selected_preset() const;  // last observed MIDI Program Change (0..511), -1 if unknown
     void debug_lcd_report() const; // diagnostic: print original firmware LCD text to console

@@ -5,6 +5,8 @@
 #include <windows.h>
 #include <mmsystem.h>
 #include "ob12_engine.h"
+#include "midi_rt_queue.h"
+#include <array>
 #include "panel_view.h"
 #include "pluginterfaces/base/ipluginbase.h"
 #include "pluginterfaces/base/ibstream.h"
@@ -112,35 +114,78 @@ struct Instrument {
     std::thread feeder;
     std::atomic<bool> stop{false};
     std::vector<float> ring = std::vector<float>(ring_size * 2);
-    std::atomic<uint32_t> written{0}, read{0};
+    std::atomic<uint64_t> written{0}, read{0};
+    MidiRtQueue<512,4096> midi_queue;
+    std::atomic<bool> midi_panic_pending{false};
+    std::atomic<uint64_t> midi_queue_drops{0};
     std::atomic<long> underruns{0};
     AnalogOut analog;
     double position = 0, step = 1;  // resampling, frames of 48 kHz per host frame
     float last[2] = {}, next[2] = {};
 
     void start_feeder(int preset) {
-    feeder = std::thread([this, preset]() {
-        bool preset_restored = false;
-        std::vector<int32_t> block(240 * 2);
-        while (!stop) {
-            uint32_t fill = written.load(std::memory_order_relaxed) - read.load(std::memory_order_acquire);
-            bool ready = engine->sounding_ready();
-            if (ready && !preset_restored && preset >= 0 && preset < 512) {
-                engine->select_preset(preset >= 256, (preset % 256) / 128, preset % 128);
-                preset_restored = true;
+        feeder = std::thread([this, preset]() {
+            bool preset_restored = false;
+            std::vector<int32_t> block(240 * 2);
+            // Diagnostics are deliberately owned by this NON-realtime worker.
+            FILE* dispatch_probe = nullptr;
+            if (const char* file = getenv("OB12_MIDI_PROBE"))
+                dispatch_probe = fopen(file, "w");
+            while (!stop.load(std::memory_order_acquire)) {
+                const uint64_t fill = written.load(std::memory_order_relaxed) -
+                                      read.load(std::memory_order_acquire);
+                const bool ready = engine->sounding_ready();
+                if (ready && !preset_restored && preset >= 0 && preset < 512) {
+                    engine->select_preset(preset >= 256, (preset % 256) / 128, preset % 128);
+                    preset_restored = true;
+                }
+                if (ready && fill >= (uint64_t)lead_frames) { Sleep(1); continue; }
+                const uint64_t base = written.load(std::memory_order_relaxed);
+                int generated = 0;
+                while (generated < 240 && !stop.load(std::memory_order_relaxed)) {
+                    const uint64_t current = base + (uint64_t)generated;
+                    // Release due messages before advancing the original CPUs/DSPs past their time.
+                    while (const auto* message = midi_queue.front()) {
+                        if (message->frame > current) break;
+                        if (dispatch_probe) {
+                            fprintf(dispatch_probe,
+                                    "P007_DISPATCH target=%llu actual=%llu status=%u pitch=%u\\n",
+                                    (unsigned long long)message->frame,
+                                    (unsigned long long)current,
+                                    (unsigned)message->bytes[0],
+                                    (unsigned)(message->length > 1 ? message->bytes[1] : 0));
+                            fflush(dispatch_probe);
+                        }
+                        engine->midi_deferred(message->bytes.data(), (int)message->length);
+                        midi_queue.pop();
+                    }
+                    if (midi_panic_pending.exchange(false, std::memory_order_acq_rel)) {
+                        // Overflow recovery never runs on the host's audio thread.
+                        for (int ch=0; ch<16; ++ch) {
+                            const uint8_t off[3] = {(uint8_t)(0xB0|ch), 123, 0};
+                            const uint8_t sound_off[3] = {(uint8_t)(0xB0|ch), 120, 0};
+                            engine->midi_deferred(off, 3);
+                            engine->midi_deferred(sound_off, 3);
+                        }
+                    }
+                    const int n = midi_queue.frames_before_next(current, 240 - generated);
+                    if (n == 0) continue; // an event arrived at this exact boundary
+                    engine->run(block.data() + generated * 2, n);
+                    generated += n;
+                }
+                if (!ready || generated != 240) continue;
+                uint64_t w = written.load(std::memory_order_relaxed);
+                const float gain = PanelView::output_gain();
+                for (int i = 0; i < 240; i++, w++) {
+                    ring[(w & (ring_size - 1)) * 2] =
+                        analog.run(0, block[i * 2] / 8388608.f) * gain;
+                    ring[(w & (ring_size - 1)) * 2 + 1] =
+                        analog.run(1, block[i * 2 + 1] / 8388608.f) * gain;
+                }
+                written.store(w, std::memory_order_release);
             }
-            if (ready && fill >= (uint32_t)lead_frames) { Sleep(1); continue; }
-            engine->run(block.data(), 240);
-            if (!ready) continue;
-            uint32_t w = written.load(std::memory_order_relaxed);
-            const float gain = PanelView::output_gain();  // the user's final gain, after the analog stage
-            for (int i = 0; i < 240; i++, w++) {
-                ring[(w & (ring_size - 1)) * 2] = analog.run(0, block[i * 2] / 8388608.f) * gain;
-                ring[(w & (ring_size - 1)) * 2 + 1] = analog.run(1, block[i * 2 + 1] / 8388608.f) * gain;
-            }
-            written.store(w, std::memory_order_release);
-        }
-    });
+            if (dispatch_probe) fclose(dispatch_probe);
+        });
     }
     bool reload_project(const std::vector<uint8_t>& saved, int preset) {
         if (!engine || saved.size() != flash_image_bytes) return false;
@@ -151,6 +196,8 @@ struct Instrument {
             start_feeder(-1);
             return false;
         }
+        midi_queue.reset_after_stop();
+        midi_panic_pending.store(false, std::memory_order_relaxed);
         std::fill(ring.begin(), ring.end(), 0.0f);
         written.store(0, std::memory_order_relaxed);
         read.store(0, std::memory_order_relaxed);
@@ -185,10 +232,10 @@ struct Instrument {
         timeEndPeriod(1);
         stop = true;
         if (feeder.joinable()) feeder.join();
-        if (getenv("OB12_VST_LOG")) printf("written %u read %u underruns %ld\n", written.load(), read.load(), underruns.load());
+        if (getenv("OB12_VST_LOG")) printf("written %llu read %llu underruns %ld midi_drops %llu\n", (unsigned long long)written.load(), (unsigned long long)read.load(), underruns.load(), (unsigned long long)midi_queue_drops.load());
     }
     bool pull() {
-        uint32_t r = read.load(std::memory_order_relaxed);
+        uint64_t r = read.load(std::memory_order_relaxed);
         if (written.load(std::memory_order_acquire) == r) return false;
         last[0] = next[0];
         last[1] = next[1];
@@ -569,90 +616,116 @@ public:
         if (reloading.load(std::memory_order_acquire)) return quiet(data);
         Instrument* inst = instrument.get();
         if (inst && inst->engine) {
-            // Notes, pressure and controller changes go to the Master's MIDI input in sample order.
-            struct Message { int32 offset; int order; uint8_t bytes[3]; int count; std::vector<uint8_t> raw; };
-            std::vector<Message> list;
-            int order = 0;
-            // Duplicate raw MIDI and mapped CC/bend is a per-callback concern.
-            // A sticky flag suppresses mapped MIDI forever after one raw event.
+            // Fixed-size stack scratch. All allocation, mutex and file logging of the
+            // original firmware now happen on the feeder worker, NOT process().
+            struct Message {
+                int32 offset = 0, order = 0;
+                uint8_t bytes[3] = {};
+                uint16_t count = 3;
+                const uint8_t* raw = nullptr;
+            };
+            std::array<Message,2048> list{};
+            int used = 0, order = 0;
             bool raw_channel_messages = false;
+            auto add = [&](const Message& message) {
+                if (used >= (int)list.size()) {
+                    inst->midi_queue_drops.fetch_add(1, std::memory_order_relaxed);
+                    inst->midi_panic_pending.store(true, std::memory_order_release);
+                } else list[used++] = message;
+            };
             if (data.inputEvents) {
-                int32 count = data.inputEvents->getEventCount();
-                for (int32 i = 0; i < count; i++) {
+                const int32 count = data.inputEvents->getEventCount();
+                for (int32 i = 0; i < count; ++i) {
                     Event e{};
                     if (data.inputEvents->getEvent(i, e) != kResultOk) continue;
-                    // A MIDI bridge: each message keeps its channel, as on the unit's MIDI IN. The Master
-                    // decides what it listens to (its channel, the parts of a multi).
-                    Message m{e.sampleOffset, order++, {}, 3};
+                    Message m{};
+                    m.offset = e.sampleOffset;
+                    m.order = order++;
                     if (e.type == Event::kNoteOnEvent) {
-                        m.bytes[0] = 0x90 | (e.noteOn.channel & 15); m.bytes[1] = (uint8_t)std::clamp<int>(e.noteOn.pitch, 0, 127);
+                        m.bytes[0] = 0x90 | (e.noteOn.channel & 15);
+                        m.bytes[1] = (uint8_t)std::clamp<int>(e.noteOn.pitch, 0, 127);
                         m.bytes[2] = (uint8_t)std::max(1, (int)std::lround(e.noteOn.velocity * 127));
                     } else if (e.type == Event::kNoteOffEvent) {
-                        m.bytes[0] = 0x80 | (e.noteOff.channel & 15); m.bytes[1] = (uint8_t)std::clamp<int>(e.noteOff.pitch, 0, 127);
-                        m.bytes[2] = (uint8_t)std::lround(e.noteOff.velocity * 127);
+                        m.bytes[0] = 0x80 | (e.noteOff.channel & 15);
+                        m.bytes[1] = (uint8_t)std::clamp<int>(e.noteOff.pitch, 0, 127);
+                        m.bytes[2] = (uint8_t)std::clamp<int>((int)std::lround(e.noteOff.velocity * 127),0,127);
                     } else if (e.type == Event::kPolyPressureEvent) {
-                        // Passed as it came, A0 note value, as the unit's MIDI IN would get it.
-                        m.bytes[0] = 0xA0 | (e.polyPressure.channel & 15); m.bytes[1] = (uint8_t)std::clamp<int>(e.polyPressure.pitch, 0, 127);
+                        m.bytes[0] = 0xA0 | (e.polyPressure.channel & 15);
+                        m.bytes[1] = (uint8_t)std::clamp<int>(e.polyPressure.pitch, 0, 127);
                         m.bytes[2] = (uint8_t)std::clamp<int>((int)std::lround(e.polyPressure.pressure * 127), 0, 127);
                     } else if (e.type == Event::kDataEvent && e.data.bytes && e.data.size) {
-                        // Some hosts (VSTHost) send controllers, bend and pressure as raw MIDI here, not
-                        // through IMidiMapping; the Master reads them as the unit's MIDI input would.
-                        // VSTHost pads every short message to three bytes: a clock tick comes as F8 00 00.
-                        // Passed whole, the two zeros ran on under the running status (after a bend,
-                        // E0 00 00, full bend down) at every tick. Only the message's own length goes on.
-                        uint32 size = std::min<uint32>(e.data.size, 4096);
-                        uint8_t status = e.data.bytes[0];
-                        uint32 length = size;
+                        if (e.data.size > 4096) {
+                            inst->midi_queue_drops.fetch_add(1, std::memory_order_relaxed);
+                            inst->midi_panic_pending.store(true, std::memory_order_release);
+                            continue;
+                        }
+                        const uint8_t status = e.data.bytes[0];
+                        uint32 length = e.data.size;
                         if (status >= 0xf8 || status == 0xf6) length = 1;
-                        else if (status == 0xf1 || status == 0xf3 || (status >= 0xc0 && status < 0xe0)) length = 2;
-                        else if (status == 0xf2 || (status >= 0x80 && status < 0xc0) || (status >= 0xe0 && status < 0xf0)) length = 3;
-                        m.raw.assign(e.data.bytes, e.data.bytes + std::min(length, size));
+                        else if (status == 0xf1 || status == 0xf3 ||
+                                 (status >= 0xc0 && status < 0xe0)) length = 2;
+                        else if (status == 0xf2 ||
+                                 (status >= 0x80 && status < 0xc0) ||
+                                 (status >= 0xe0 && status < 0xf0)) length = 3;
+                        m.count = (uint16_t)std::min(length,e.data.size);
+                        m.raw = e.data.bytes;
                         if (status >= 0x80 && status < 0xf0) raw_channel_messages = true;
                     } else continue;
-                    list.push_back(m);
+                    add(m);
                 }
             }
-            // Hosts that pass raw MIDI (VSTHost) also feed the controller mapping; taking both sent
-            // every bend and pressure twice. The mapping is used only by a host that sends no raw MIDI.
+            // Only suppress mirrored controller mapping inside the same host callback.
             IParameterChanges* changes = raw_channel_messages ? nullptr : data.inputParameterChanges;
-            if (changes) {
-                int32 count = changes->getParameterCount();
-                for (int32 i = 0; i < count; i++) {
-                    IParamValueQueue* queue = changes->getParameterData(i);
-                    if (!queue) continue;
-                    ParamID id = queue->getParameterId();
-                    if (id >= (ParamID)midi_params) continue;
-                    for (int32 p = 0; p < queue->getPointCount(); p++) {
-                        int32 offset = 0;
-                        ParamValue v = 0;
-                        if (queue->getPoint(p, offset, v) != kResultOk) continue;
-                        Message m{offset, order++, {}, 3};
-                        if (id == kPitchBend) {
-                            int bend = std::clamp((int)std::lround(v * 16383), 0, 16383);
-                            m.bytes[0] = 0xE0; m.bytes[1] = bend & 0x7f; m.bytes[2] = bend >> 7;
-                        } else if (id == kAfterTouch) {
-                            m.bytes[0] = 0xD0; m.bytes[1] = (uint8_t)std::clamp((int)std::lround(v * 127), 0, 127); m.count = 2;
-                        } else {
-                            m.bytes[0] = 0xB0; m.bytes[1] = (uint8_t)id; m.bytes[2] = (uint8_t)std::clamp((int)std::lround(v * 127), 0, 127);
-                        }
-                        list.push_back(m);
+            if (changes) for (int32 i=0; i<changes->getParameterCount(); ++i) {
+                IParamValueQueue* queue = changes->getParameterData(i);
+                if (!queue) continue;
+                const ParamID id = queue->getParameterId();
+                if (id >= (ParamID)midi_params) continue;
+                for (int32 p=0; p<queue->getPointCount(); ++p) {
+                    int32 offset=0;
+                    ParamValue v=0;
+                    if (queue->getPoint(p,offset,v)!=kResultOk) continue;
+                    Message m{};
+                    m.offset=offset; m.order=order++;
+                    if (id==kPitchBend) {
+                        const int bend=std::clamp((int)std::lround(v*16383),0,16383);
+                        m.bytes[0]=0xE0; m.bytes[1]=bend&0x7f; m.bytes[2]=bend>>7;
+                    } else if (id==kAfterTouch) {
+                        m.bytes[0]=0xD0;
+                        m.bytes[1]=(uint8_t)std::clamp((int)std::lround(v*127),0,127);
+                        m.count=2;
+                    } else {
+                        m.bytes[0]=0xB0;
+                        m.bytes[1]=(uint8_t)id;
+                        m.bytes[2]=(uint8_t)std::clamp((int)std::lround(v*127),0,127);
                     }
+                    add(m);
                 }
             }
-            std::stable_sort(list.begin(), list.end(), [](const Message& a, const Message& b) { return a.offset < b.offset; });
-            for (auto& m : list) {
-                if (!m.raw.empty()) inst->engine->midi(m.raw.data(), (int)m.raw.size());
-                else inst->engine->midi(m.bytes, m.count);
-            }
-            if (FILE* f = midi_log()) {
-                for (auto& m : list) {
-                    if (m.raw.empty()) { fprintf(f, "midi %02X %02X %02X\n", m.bytes[0], m.bytes[1], m.count > 2 ? m.bytes[2] : 0); continue; }
-                    if (m.raw.size() == 1 && m.raw[0] >= 0xf8) continue;  // clock and sensing would flood it
-                    fprintf(f, "data");
-                    for (size_t j = 0; j < m.raw.size() && j < 16; j++) fprintf(f, " %02X", m.raw[j]);
-                    fprintf(f, m.raw.size() > 16 ? " ... (%zu)\n" : "\n", m.raw.size());
+            std::sort(list.begin(), list.begin()+used, [](const Message& a,const Message& b) {
+                if (a.offset != b.offset) return a.offset < b.offset;
+                return a.order < b.order;
+            });
+            // 240 extra frames provide a boundary margin above the existing lead
+            // while the VST3 host block is being submitted. This is an experimental
+            // producer timeline and NOT a measured audio latency/PDC claim.
+            const uint64_t origin = inst->read.load(std::memory_order_acquire) +
+                                    (uint64_t)(lead_frames + 240);
+            const double native_per_host = rate > 0 ? 48000.0 / rate : 1.0;
+            for (int i=0; i<used; ++i) {
+                const Message& m = list[i];
+                const uint8_t* bytes = m.raw ? m.raw : m.bytes;
+                const int32 offset = std::clamp<int32>(m.offset, 0, std::max<int32>(0,data.numSamples));
+                const uint64_t target = origin +
+                    (uint64_t)std::llround((double)offset * native_per_host);
+                if (!inst->midi_queue.push(target,bytes,m.count)) {
+                    inst->midi_queue_drops.fetch_add(1, std::memory_order_relaxed);
+                    inst->midi_panic_pending.store(true, std::memory_order_release);
+                    continue;
                 }
-                if (!list.empty()) fflush(f);
+                // The DAW may getState immediately after process without the feeder
+                // having reached this future MIDI frame yet.
+                inst->engine->observe_host_midi(bytes, m.count);
             }
         }
         if (data.numSamples <= 0 || data.numOutputs < 1 || !data.outputs || data.outputs[0].numChannels < 1) return kResultOk;

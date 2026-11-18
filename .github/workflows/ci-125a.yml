@@ -28,6 +28,21 @@ jobs:
           if errorlevel 1 exit /b 1
           clang-cl /nologo /EHsc /std:c++17 /D_CRT_SECURE_NO_WARNINGS /Isrc /Ivendor\vst3sdk /c src\ob12_vst3.cpp /Fobuild\source-check-vst3.obj
           if errorlevel 1 exit /b 1
+      - name: P007 bounded realtime MIDI FIFO and deliberate timing-mutation counterexample
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          clang-cl /nologo /O2 /EHsc /std:c++17 /Isrc tools\test_midi_rt_queue.cpp /Fe:build\test_midi_rt_queue.exe
+          if errorlevel 1 exit /b 1
+          build\test_midi_rt_queue.exe
+          if errorlevel 1 exit /b 1
+          clang-cl /nologo /O2 /EHsc /std:c++17 /DP007_TEST_TIMING_MUTANT /Isrc tools\test_midi_rt_queue.cpp /Fe:build\test_midi_rt_mutant.exe
+          if errorlevel 1 exit /b 1
+          build\test_midi_rt_mutant.exe > build\p007-mutant.log
+          if not errorlevel 7 exit /b 1
+          findstr /C:"P007_MIDI_QUEUE_FAIL=exact 48-kHz event boundary" build\p007-mutant.log >nul
+          if errorlevel 1 exit /b 1
       - name: Link real Windows VST3 library (without firmware)
         shell: cmd
         run: |

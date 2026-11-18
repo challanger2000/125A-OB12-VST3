@@ -170,7 +170,7 @@ struct Engine::Impl {
     std::mutex run_lock; // protects entire Master CPU run and flash against UI snapshots
     std::atomic<bool> input_waiting{false};
     std::vector<u8> midi_bytes;
-    int bank_msb = 64, bank_lsb = 0; // channel 1, last MIDI bank select
+    std::atomic<int> bank_msb{64}, bank_lsb{0}; // channel 1 host bank selection
     std::atomic<int> selected_program{-1};
     std::vector<std::vector<u8>> pending_sysex;
     int pending_gap = 100;
@@ -996,21 +996,20 @@ int Engine::selected_preset() const {
     return impl->selected_program.load(std::memory_order_relaxed);
 }
 
-void Engine::midi(const uint8_t* bytes, int count) {
+void Engine::observe_host_midi(const uint8_t* bytes, int count) noexcept {
     if (!bytes || count <= 0) return;
-    std::lock_guard<std::mutex> hold(impl->input_lock);
-    // Observe bank/program messages from the browser AND the DAW. This doesn't
-    // pretend to track selections made by buttons inside the original firmware.
+    // This is the only Engine call from the VST3 realtime thread.
+    // The original firmware input/vector work is performed by midi_deferred on the feeder.
     for (int i = 0; i < count;) {
-        uint8_t status = bytes[i];
-        if (status == 0xf0) break; // SysEx payload is not channel MIDI
+        const uint8_t status = bytes[i];
+        if (status == 0xf0) break;
         if (status == 0xb0 && i + 2 < count) {
-            if (bytes[i + 1] == 0) impl->bank_msb = bytes[i + 2];
-            if (bytes[i + 1] == 32) impl->bank_lsb = bytes[i + 2];
+            if (bytes[i + 1] == 0) impl->bank_msb.store(bytes[i + 2], std::memory_order_relaxed);
+            if (bytes[i + 1] == 32) impl->bank_lsb.store(bytes[i + 2], std::memory_order_relaxed);
             i += 3;
         } else if (status == 0xc0 && i + 1 < count) {
-            int value = ((impl->bank_msb >= 64) ? 256 : 0) +
-                        ((impl->bank_lsb >= 64) ? 128 : 0) + bytes[i + 1];
+            const int value = ((impl->bank_msb.load(std::memory_order_relaxed) >= 64) ? 256 : 0) +
+                              ((impl->bank_lsb.load(std::memory_order_relaxed) >= 64) ? 128 : 0) + bytes[i + 1];
             if (value >= 0 && value < 512)
                 impl->selected_program.store(value, std::memory_order_relaxed);
             i += 2;
@@ -1020,8 +1019,16 @@ void Engine::midi(const uint8_t* bytes, int count) {
             i += std::min(3, count - i);
         } else ++i;
     }
+}
+void Engine::midi_deferred(const uint8_t* bytes, int count) {
+    if (!bytes || count <= 0) return;
+    std::lock_guard<std::mutex> hold(impl->input_lock);
     impl->midi_bytes.insert(impl->midi_bytes.end(), bytes, bytes + count);
-    impl->input_waiting = true;
+    impl->input_waiting.store(true, std::memory_order_release);
+}
+void Engine::midi(const uint8_t* bytes, int count) {
+    observe_host_midi(bytes, count);
+    midi_deferred(bytes, count);
 }
 
 void Engine::set_pot(int channel, int mux, int value) {
