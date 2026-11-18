@@ -45,10 +45,48 @@ jobs:
           if errorlevel 1 exit /b 1
           clang-cl /nologo /EHsc /std:c++17 /Ivendor\vst3sdk /c tools\vst3_iids.cpp /Fobuild\vst3_iids.obj
           if errorlevel 1 exit /b 1
-          clang-cl /nologo /LD build\source-check-vst3.obj build\source-check-panel.obj build\source-check-engine.obj build\f2mc16.obj build\tms57070.obj build\coreiids.obj build\funknown.obj build\vstinitiids.obj build\vst3_iids.obj synchronization.lib d2d1.lib dwrite.lib windowscodecs.lib gdi32.lib user32.lib ole32.lib comdlg32.lib winmm.lib /Fe:build\OB12.vst3
+          if not exist build\OB12.vst3\Contents\x86_64-win mkdir build\OB12.vst3\Contents\x86_64-win
+          clang-cl /nologo /LD build\source-check-vst3.obj build\source-check-panel.obj build\source-check-engine.obj build\f2mc16.obj build\tms57070.obj build\coreiids.obj build\funknown.obj build\vstinitiids.obj build\vst3_iids.obj synchronization.lib d2d1.lib dwrite.lib windowscodecs.lib gdi32.lib user32.lib ole32.lib comdlg32.lib winmm.lib /Fe:build\OB12.vst3\Contents\x86_64-win\OB12.vst3
           if errorlevel 1 exit /b 1
-          if not exist build\OB12.vst3 exit /b 1
+          if not exist build\OB12.vst3\Contents\x86_64-win\OB12.vst3 exit /b 1
 
+      - name: Stage upstream original firmware for private integration validation
+        shell: pwsh
+        timeout-minutes: 4
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://github.com/Tuth/ob12-emu/releases/download/v0.10.0/OB-12-v0.10-win64.zip'
+          Invoke-WebRequest -Uri $url -OutFile 'build/upstream-test.zip'
+          Expand-Archive -LiteralPath 'build/upstream-test.zip' -DestinationPath 'build/upstream-test' -Force
+          $cpu = Get-ChildItem 'build/upstream-test' -Recurse -File -Filter '12cpu152-CPU-v1.52-FINAL.bin' | Select-Object -First 1
+          if (-not $cpu) { throw 'Original release firmware was not found' }
+          $target = 'build/OB12.vst3/Contents/x86_64-win/rom'
+          New-Item -ItemType Directory -Force -Path $target | Out-Null
+          Copy-Item -Path "$($cpu.Directory.FullName)\*" -Destination $target -Recurse -Force
+          if (-not (Test-Path "$target/dsp")) { throw 'DSP resources were not found in firmware bundle' }
+          Write-Host "Firmware test resources loaded: $((Get-ChildItem $target -Recurse -File).Count) files. Temporary use only, not published."
+      - name: Build translated DSP and link firmware-backed Windows VST3
+        shell: cmd
+        timeout-minutes: 8
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          python tools\gen_fast.py build\OB12.vst3\Contents\x86_64-win\rom\dsp build\tms_fast.inc
+          if errorlevel 1 exit /b 1
+          clang-cl /nologo /O2 /EHsc /std:c++17 /D_CRT_SECURE_NO_WARNINGS /Isrc /Isrc\shim /Isrc\f2mc16 /Ibuild /FIemu.h /c src\tms57070\tms57070.cpp /Fobuild\tms57070.obj
+          if errorlevel 1 exit /b 1
+          clang-cl /nologo /LD build\source-check-vst3.obj build\source-check-panel.obj build\source-check-engine.obj build\f2mc16.obj build\tms57070.obj build\coreiids.obj build\funknown.obj build\vstinitiids.obj build\vst3_iids.obj synchronization.lib d2d1.lib dwrite.lib windowscodecs.lib gdi32.lib user32.lib ole32.lib comdlg32.lib winmm.lib /Fe:build\OB12.vst3\Contents\x86_64-win\OB12.vst3
+          if errorlevel 1 exit /b 1
+      - name: Test real firmware-backed note, audio and editor lifecycle
+        shell: cmd
+        timeout-minutes: 4
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          clang-cl /nologo /EHsc /std:c++17 /Ivendor\vst3sdk tools\vst3_smoke.cpp build\coreiids.obj build\funknown.obj build\vstinitiids.obj ole32.lib user32.lib /Fe:build\vst3_smoke.exe
+          if errorlevel 1 exit /b 1
+          build\vst3_smoke.exe build\OB12.vst3\Contents\x86_64-win\OB12.vst3
+          if errorlevel 1 exit /b 1
       - name: Verify VST3 factory and interfaces without firmware
         shell: cmd
         run: |
@@ -56,6 +94,6 @@ jobs:
           if errorlevel 1 exit /b 1
           clang-cl /nologo /EHsc /std:c++17 /Ivendor\vst3sdk tools\vst3_norom_smoke.cpp build\coreiids.obj build\funknown.obj build\vstinitiids.obj ole32.lib user32.lib /Fe:build\vst3_norom_smoke.exe
           if errorlevel 1 exit /b 1
-          build\vst3_norom_smoke.exe build\OB12.vst3
+          build\vst3_norom_smoke.exe build\OB12.vst3\Contents\x86_64-win\OB12.vst3
           if errorlevel 1 exit /b 1
 
