@@ -22,7 +22,7 @@ int main(int argc,char** argv) {
     }
     const std::string romdir = argv[1];
     const std::string mode=argv[6];
-    if(mode!="program" && mode!="timbre" && mode!="pair" && mode!="reverse") return 2;
+    if(mode!="program" && mode!="timbre" && mode!="pair" && mode!="reverse" && mode!="direct") return 2;
     std::vector<uint8_t> tmb,prg;
     const std::string tmb_error = Engine::read_sysex(std::wstring(argv[2],argv[2]+strlen(argv[2])),tmb);
     const std::string prg_error = Engine::read_sysex(std::wstring(argv[3],argv[3]+strlen(argv[3])),prg);
@@ -46,6 +46,56 @@ int main(int argc,char** argv) {
     if(!e.sounding_ready() || !e.snapshot_flash(before)) {
         puts("BANK_TEST_FAIL engine failed to boot");
         return 5;
+    }
+    if (mode == "direct") {
+        std::vector<uint8_t> tmb_image, prg_image;
+        uint32_t tmb_address = 0, prg_address = 0;
+        std::string tmb_error = Engine::decode_bank(tmb, tmb_image, tmb_address);
+        std::string prg_error = Engine::decode_bank(prg, prg_image, prg_address);
+        if (!tmb_error.empty() || !prg_error.empty() ||
+            tmb_address != 0xC0000 || prg_address != 0xD0000 ||
+            tmb_image != expected_tmb || prg_image != expected_prg) {
+            printf("BANK_DIRECT_DECODE_FAIL TIMBRE=%s PROGRAM=%s\n",
+                   tmb_error.c_str(), prg_error.c_str());
+            return 8;
+        }
+        std::vector<uint8_t> invalid = prg;
+        invalid[100] ^= 1;
+        std::vector<uint8_t> parsed;
+        uint32_t bogus = 0;
+        if (Engine::decode_bank(invalid, parsed, bogus).empty()) {
+            puts("BANK_DIRECT_FAIL: corrupt checksum accepted");
+            return 8;
+        }
+        if (e.apply_bank_pair({}, tmb_image)) {
+            puts("BANK_DIRECT_FAIL: invalid bank size accepted");
+            return 8;
+        }
+        auto mutated = prg_image;
+        mutated[30] ^= 1; // prove actual write (restore before any CPU note selection)
+        if (!e.apply_bank_pair(mutated, tmb_image)) return 8;
+        std::vector<uint8_t> probe;
+        if (!e.snapshot_flash(probe) || probe.size() != 0x100000 ||
+            probe[0xD0000 + 30] != mutated[30]) return 8;
+        if (!e.apply_bank_pair(prg_image, tmb_image)) return 8;
+        std::vector<uint8_t> after;
+        if (!e.snapshot_flash(after) || after.size() != 0x100000 ||
+            !std::equal(expected_tmb.begin(),expected_tmb.end(),after.begin()+0xC0000) ||
+            !std::equal(expected_prg.begin(),expected_prg.end(),after.begin()+0xD0000))
+            return 8;
+        e.select_preset(true,0,0); // original Master loads Program A001 from new flash
+        advance(2);
+        const uint8_t on[] = {0x90,60,100};
+        e.midi(on,3);
+        long audible = 0;
+        for (int i=0; i<400; i++) {
+            e.run(audio.data(),240);
+            for (int32_t value : audio) if (value < -32 || value > 32) ++audible;
+        }
+        const bool ok = audible > 100 && e.sounding_ready();
+        printf("BANK_DIRECT_TEST=%s original_cpu_audio_samples=%ld checksum_validation=PASS data_bytes=%zu\n",
+               ok ? "PASS" : "FAIL", audible,prg_image.size()+tmb_image.size());
+        return ok ? 0 : 8;
     }
     long baseline=e.flash_writes();
     printf("BANK_TEST_START mode=%s boot_writes=%ld sysex_bytes=%zu/%zu\n",mode.c_str(),baseline,tmb.size(),prg.size());
