@@ -111,6 +111,8 @@ struct PanelView::Impl {
     std::vector<Run> runs;
     float art_w = 472, art_h = 126;
     std::function<void(int)> width_request;
+    std::function<void(void*)> host_size_check;
+    int frame_ticks = 0;
     int width = 0, height = 0;
 
     int pot_value[sizeof panel_pots / sizeof panel_pots[0]];
@@ -913,7 +915,20 @@ struct PanelView::Impl {
             return 0;
         }
         case WM_ERASEBKGND: return 1;
-        case WM_TIMER: InvalidateRect(hwnd, nullptr, FALSE); return 0;
+        case WM_TIMER:
+            if (wparam == frame_timer) {
+                // Real hosts (Studio One) may restore their saved window size
+                // AFTER IPlugView::attached. Never negotiate size reentrantly
+                // during WM_CREATE / attached. Retry a bounded 4 times to
+                // cover delayed asynchronous host layout.
+                const int tick = ++self->frame_ticks;
+                if (self->host_size_check &&
+                    (tick == 3 || tick == 10 || tick == 25 || tick == 50))
+                    self->host_size_check(hwnd);
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            break;
         case WM_LBUTTONDOWN: self->mouse_down(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)); return 0;
         case WM_MOUSEMOVE: self->mouse_move(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)); return 0;
         case WM_LBUTTONUP: self->mouse_up(); return 0;
@@ -996,6 +1011,7 @@ bool PanelView::attach(void* parent) {
     SetWindowLongPtrW(impl->window, GWLP_USERDATA, (LONG_PTR)impl);
     impl->width = rc.right;
     impl->height = rc.bottom;
+    impl->frame_ticks = 0;
     SetTimer(impl->window, frame_timer, 33, nullptr);
     return true;
 }
@@ -1039,3 +1055,4 @@ float PanelView::output_gain() { return powf(10.f, output_gain_db() / 20.f); }
 float PanelView::aspect() const { return impl->art_w * (1 + panel_c_w / panel_frame_w) / impl->art_h; }
 
 void PanelView::on_width_request(std::function<void(int)> request) { impl->width_request = std::move(request); }
+void PanelView::on_host_size_check(std::function<void(void*)> check) { impl->host_size_check = std::move(check); }

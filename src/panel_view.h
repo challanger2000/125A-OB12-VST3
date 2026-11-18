@@ -15,6 +15,9 @@ public:
     float aspect() const;  // width over height of the art
     // The right click menu offers sizes; the owner resizes the window and calls resize().
     void on_width_request(std::function<void(int width)> request);
+    // Invoked after the editor has returned from attached(). The host can
+    // finalize its layout only after that call, not inside the callback.
+    void on_host_size_check(std::function<void(void* panel_hwnd)> check);
     static constexpr int base_width = 1500;  // the 100% size
     // Output gain, 0 to +24 dB in whole dB, after the analog stage at the very end of the chain. A user
     // setting (%LOCALAPPDATA%\OB12\output_gain.txt), set from the panel menu, read by the plug-in.

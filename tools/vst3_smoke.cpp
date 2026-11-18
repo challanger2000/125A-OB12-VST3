@@ -94,11 +94,19 @@ struct Changes final : IParameterChanges {
 struct Frame final : IPlugFrame {
     bool calls_back = true;
     int requests = 0;
+    HWND saved_container = nullptr;
+    int last_host_width = 0; // simulate a host that caches width before attach()
     tresult PLUGIN_API queryInterface(const TUID, void** obj) override { *obj = nullptr; return kNoInterface; }
     uint32 PLUGIN_API addRef() override { return 1; }
     uint32 PLUGIN_API release() override { return 1; }
     tresult PLUGIN_API resizeView(IPlugView* view, ViewRect* r) override {
         requests++;
+        if (saved_container && r->getWidth() != last_host_width) {
+            SetWindowPos(saved_container, nullptr, 0, 0,
+                         r->getWidth(), r->getHeight(),
+                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            last_host_width = r->getWidth();
+        }
         if (calls_back) view->onSize(r);
         return kResultOk;
     }
@@ -266,6 +274,53 @@ static bool test_second_plugin_instance(const char* dll_path) {
     return true;
 }
 
+
+static bool test_studio_one_delayed_frame(IComponent* component) {
+    IEditController* controller = nullptr;
+    if (component->queryInterface(IEditController::iid, (void**)&controller) != kResultOk || !controller) return false;
+    IPlugView* view = controller->createView(ViewType::kEditor);
+    if (!view) { controller->release(); return false; }
+    ViewRect expected{};
+    view->getSize(&expected);
+    const int width = expected.getWidth(), height = expected.getHeight();
+    // WS_POPUP makes the window's client area exactly the requested dimensions.
+    HWND host = CreateWindowW(L"STATIC", L"", WS_POPUP, 0, 0, width, height + 96,
+                              nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    Frame frame;
+    frame.saved_container = host;
+    frame.last_host_width = width; // host ignores same-width requests
+    view->setFrame(&frame);
+    bool ok = host && view->attached(host, kPlatformTypeHWND) == kResultOk;
+    RECT before{};
+    GetClientRect(host, &before);
+    ok = ok && before.bottom == height + 96;
+    HWND panel = host ? FindWindowExW(host, nullptr, L"125A_OB12_PanelView_v2", nullptr) : nullptr;
+    ok = ok && panel != nullptr;
+    if (panel) {
+        // Explicit message injection: test does not depend on the runner's
+        // foreground window or real timer scheduling.
+        for (int tick = 0; tick < 3; ++tick)
+            SendMessageW(panel, WM_TIMER, 1, 0);
+    }
+    RECT after{}, child{};
+    if (host) GetClientRect(host, &after);
+    if (panel) GetClientRect(panel, &child);
+    ViewRect returned{};
+    view->getSize(&returned);
+    ok = ok && after.right == width && after.bottom == height &&
+         child.right == width && child.bottom == height &&
+         returned.getWidth() == width && returned.getHeight() == height &&
+         frame.requests >= 3;
+    printf("STUDIO_ONE_DEFERRED_FRAME_TEST=%s before=%ldx%ld after=%ldx%ld panel=%ldx%ld resize_calls=%d\n",
+           ok?"PASS":"FAIL",before.right,before.bottom,after.right,after.bottom,
+           child.right,child.bottom,frame.requests);
+    view->removed();
+    view->release();
+    if (host) DestroyWindow(host);
+    controller->release();
+    return ok;
+}
+
 int main(int, char** argv) {
     char temp[MAX_PATH];
     GetTempPathA(MAX_PATH, temp);
@@ -390,11 +445,13 @@ int main(int, char** argv) {
     }
     printf("PROJECT_STATE_TEST=%s bytes=%zu\n", state_ok ? "PASS" : "FAIL", state.storage.size());
     const bool browser_ok = test_scale(component, &state);
+    const bool deferred_frame_ok = test_studio_one_delayed_frame(component);
     audio->setProcessing(false);
     component->setActive(false);
     component->terminate();
     component->release();
     FreeLibrary(dll);
     const bool reload_ok = test_second_plugin_instance(argv[1]);
-    return audio_ok && preselect_browser_ok && state_ok && browser_ok && reload_ok ? 0 : 2;
+    return audio_ok && preselect_browser_ok && state_ok && browser_ok &&
+           deferred_frame_ok && reload_ok ? 0 : 2;
 }

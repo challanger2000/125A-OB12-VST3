@@ -348,6 +348,30 @@ private:
         if (size.getWidth() != width) onSize(&r);  // not every host calls back
     }
 
+    void reconcile_delayed_host_frame(HWND panel) {
+        if (!frame || !IsWindow(panel)) return;
+        HWND parent = GetParent(panel);
+        if (!parent || !IsWindow(parent)) return;
+        RECT client{};
+        if (!GetClientRect(parent, &client)) return;
+        const int actual_width = client.right - client.left;
+        const int actual_height = client.bottom - client.top;
+        const int expected_width = size.getWidth();
+        const int expected_height = size.getHeight();
+        if (actual_width <= 0 || actual_height <= 0 ||
+            (std::abs(actual_width - expected_width) <= 2 &&
+             std::abs(actual_height - expected_height) <= 2)) return;
+        trace("editor %p deferred frame mismatch host=%dx%d plugin=%dx%d",
+              this, actual_width, actual_height, expected_width, expected_height);
+        // Many hosts ignore resizeView() when the requested width is unchanged:
+        // an updated height alone does not invalidate their cached layout.
+        // The SAME width change used by the working Zoom menu forces their
+        // real editor frame to be recomputed. Restore the exact user width
+        // immediately afterwards. Never change the plug-in's project state.
+        request_width(expected_width + 1);
+        request_width(expected_width);
+    }
+
     std::atomic<uint32> refs{1};
     Plugin& owner;
     PanelView view;
@@ -673,6 +697,9 @@ Editor::Editor(Plugin& p, Engine& engine) : owner(p), view(engine, rom_folder() 
     size.right = load_editor_width();
     size.bottom = (int)std::lround(size.right / view.aspect());
     view.on_width_request([this](int width) { request_width(width); });
+    view.on_host_size_check([this](void* panel_hwnd) {
+        reconcile_delayed_host_frame((HWND)panel_hwnd);
+    });
 }
 Editor::~Editor() {
     trace("editor %p deleted", this); view.detach(); static_cast<IComponent&>(owner).release(); }
