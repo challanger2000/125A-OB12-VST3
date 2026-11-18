@@ -15,10 +15,12 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <memory>
 #include <vector>
 #include "ob12_engine.h"
 #include "panel_controls.h"
 #include "panel_view.h"
+#include "preset_browser.h"
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
 #pragma comment(lib, "windowscodecs.lib")
@@ -57,6 +59,7 @@ constexpr int shot_command = 1999;
 constexpr int syx_command = 1500;    // load a .syx or .mid into MIDI IN, as a sequencer would
 constexpr int factory_command = 1501;  // forget the stored memory
 constexpr int gain_command = 1600;     // plus 0-24: output gain in dB
+constexpr int browser_command = 1503;
 constexpr int dump_command = 1502;     // save what MIDI OUT sent as system exclusive (a bulk dump)   // hidden: save the panel to OB12_PANEL_SHOT as PNG
 constexpr int scale_percents[] = {50, 67, 75, 100, 125, 150, 200};
 
@@ -92,6 +95,7 @@ const UINT_PTR frame_timer = 1;
 
 struct PanelView::Impl {
     Engine& engine;
+    std::unique_ptr<PresetBrowser> browser;
     HWND window = nullptr;
     ID2D1Factory* factory = nullptr;
     ID2D1RenderTarget* target = nullptr;        // the window's, or a WIC bitmap's for save_image
@@ -594,6 +598,8 @@ struct PanelView::Impl {
 
     void scale_menu(LPARAM at) {
         HMENU menu = CreatePopupMenu();
+        AppendMenuW(menu, MF_STRING, browser_command, L"Preset Browser...");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, syx_command, L"Load .syx / .mid into MIDI IN...");
         size_t sent = engine.sysex_sent();
         wchar_t dump_text[96];
@@ -912,6 +918,7 @@ struct PanelView::Impl {
             // reaching this window must not be taken for a size or a gain.
             if (lparam != 0 || HIWORD(wparam) != 0) break;
             int percent = (int)LOWORD(wparam) - scale_command;
+            if (LOWORD(wparam) == browser_command) { if (self->browser) self->browser->show(self->window); return 0; }
             if (LOWORD(wparam) == syx_command) { self->load_sysex(); return 0; }
             if (LOWORD(wparam) == factory_command) { self->reset_memory(); return 0; }
             if (LOWORD(wparam) == dump_command) { self->save_dump(); return 0; }
@@ -936,6 +943,7 @@ struct PanelView::Impl {
 
 PanelView::PanelView(Engine& engine, const std::string& art_file) : impl(new Impl(engine)) {
     D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &impl->factory);
+    impl->browser.reset(new PresetBrowser(engine, art_file));
     impl->load(art_file);
     impl->find_moving();
     impl->find_dial();
@@ -975,6 +983,7 @@ bool PanelView::attach(void* parent) {
 }
 
 void PanelView::detach() {
+    if (impl->browser) impl->browser->close();
     if (!impl->window) return;
     KillTimer(impl->window, frame_timer);
     impl->drop_target();

@@ -15,6 +15,7 @@ public:
     void run(int32_t* frames, int n);
 
     void midi(const uint8_t* bytes, int count);          // into the Master's MIDI input  (31250 baud, a .syx whole)
+    void select_preset(bool program, int bank, int slot);  // MIDI bank select and program change; bank 0/1, slot 0..127
 
     // The Master's flash (29F800, 1 MB) is the unit's only memory that survives switching off:
     // the SRAM has no battery. Call before the first run(): sectors stored in the file replace

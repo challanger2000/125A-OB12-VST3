@@ -615,6 +615,18 @@ void Engine::run(int32_t* frames, int n) {
     while (e.made < n) e.next_batch();
 }
 
+void Engine::select_preset(bool program, int bank, int slot) {
+    if (bank < 0 || bank > 1 || slot < 0 || slot >= 128) return;
+    // Original OB-12 bank select: MSB 64..127 = Programs, 0..63 = Timbres;
+    // LSB 0..63 = A, 64..127 = B (manual, MIDI Program Map disabled).
+    const uint8_t bytes[8] = {
+        0xb0, 0x00, (uint8_t)(program ? 64 : 0),
+        0xb0, 0x20, (uint8_t)(bank ? 64 : 0),
+        0xc0, (uint8_t)slot
+    };
+    midi(bytes, sizeof bytes);
+}
+
 void Engine::midi(const uint8_t* bytes, int count) {
     std::lock_guard<std::mutex> hold(impl->input_lock);
     impl->midi_bytes.insert(impl->midi_bytes.end(), bytes, bytes + count);
