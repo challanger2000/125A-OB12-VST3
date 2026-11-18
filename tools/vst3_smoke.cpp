@@ -173,7 +173,7 @@ static bool test_scale(IComponent* component, MemoryState* saved) {
         wchar_t status[160] = {};
         if (HWND label = GetDlgItem(browser, 3109)) GetWindowTextW(label, status, 160);
         browser_ok = initial == 128 && after == 128 && types == 2 && banks == 2 &&
-                     collections >= 2 && factory_program_ok && factory_timbre_ok &&
+                     collections >= 3 && factory_program_ok && factory_timbre_ok &&
                      wcsstr(status, L"Timbre") != nullptr;
         printf("BROWSER_TEST=%s slots=%d/%d types=%d banks=%d soundbank_options=%d names=%s/%s\n",
                browser_ok ? "PASS" : "FAIL", initial, after, types, banks, collections,
@@ -204,6 +204,8 @@ int main(int, char** argv) {
     CreateDirectoryA(user_library.c_str(), nullptr);
     { std::ofstream(user_library + "\\12prgTT.mid", std::ios::binary).put('X'); }
     { std::ofstream(user_library + "\\12tmbTT.mid", std::ios::binary).put('X'); }
+    { std::ofstream(user_library + "\\12prgVA2.mid", std::ios::binary).put('X'); }
+    { std::ofstream(user_library + "\\12tmbVA2.mid", std::ios::binary).put('X'); }
     HMODULE dll = LoadLibraryA(argv[1]);
     if (!dll) { puts("load failed"); return 1; }
     auto get = (IPluginFactory * (PLUGIN_API*)())GetProcAddress(dll, "GetPluginFactory");
