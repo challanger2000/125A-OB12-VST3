@@ -63,13 +63,15 @@ jobs:
           $target = 'build/OB12.vst3/Contents/x86_64-win/rom'
           New-Item -ItemType Directory -Force -Path $target | Out-Null
           Copy-Item -Path "$($cpu.Directory.FullName)\*" -Destination $target -Recurse -Force
-          if (-not (Test-Path "$target/dsp")) { throw 'DSP resources were not found in firmware bundle' }
+          if (-not (Test-Path "$target/12dsp111-DSP-v1.11-FINAL.bin")) { throw 'Original DSP firmware was not found' }
           Write-Host "Firmware test resources loaded: $((Get-ChildItem $target -Recurse -File).Count) files. Temporary use only, not published."
       - name: Build translated DSP and link firmware-backed Windows VST3
         shell: cmd
         timeout-minutes: 8
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          python tools\ob12_carve.py build\OB12.vst3\Contents\x86_64-win\rom\12dsp111-DSP-v1.11-FINAL.bin -o build\OB12.vst3\Contents\x86_64-win\rom\dsp
           if errorlevel 1 exit /b 1
           python tools\gen_fast.py build\OB12.vst3\Contents\x86_64-win\rom\dsp build\tms_fast.inc
           if errorlevel 1 exit /b 1
