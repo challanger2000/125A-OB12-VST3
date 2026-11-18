@@ -100,7 +100,8 @@ private:
         return (c >= ' ' && c <= '~');
     }
     static std::string extract(const std::vector<unsigned char>& bytes, size_t at, size_t end) {
-        if (at > 0 && ascii_name_char(bytes[at - 1])) return {};
+        // The verified factory Program (158 B) and Timbre (167 B) records start
+        // directly with an ASCII name. The preceding byte belongs to another record.
         std::string value;
         for (size_t i = at; i < end && value.size() < 24 && ascii_name_char(bytes[i]); ++i)
             value.push_back((char)bytes[i]);
@@ -121,6 +122,21 @@ private:
             return false;
         size_t stride = bytes.size() / 256;
         if (stride < 16 || stride > 4096) return false;
+        // Verified against the upstream v0.10.0 firmware assets: names begin at byte 0.
+        // Do not let a shifted one-character-short candidate outrank the actual name.
+        if ((type == 0 && stride == 158) || (type == 1 && stride == 167)) {
+            std::array<std::string, 256> actual{};
+            std::set<std::string> unique;
+            int good = 0;
+            for (int i = 0; i < 256; ++i) {
+                actual[i] = extract(bytes, i * stride, (i + 1) * stride);
+                if (!actual[i].empty()) { ++good; unique.insert(actual[i]); }
+            }
+            if (good >= 160 && unique.size() >= 64) {
+                names_[type] = std::move(actual);
+                return true;
+            }
+        }
         int best_score = -1;
         std::array<std::string, 256> best{};
         for (size_t offset = 0; offset + 4 < stride; ++offset) {
