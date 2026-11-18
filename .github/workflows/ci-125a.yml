@@ -1,0 +1,30 @@
+name: 125A OB-12 source compile check
+on:
+  push:
+    branches: [feature/preset-browser-audit]
+  workflow_dispatch:
+jobs:
+  compile:
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: steinbergmedia/vst3sdk
+          ref: v3.7.12_build_20
+          path: vendor/vst3sdk
+          submodules: recursive
+      - name: Compile changed source files without ROM
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          if not exist build mkdir build
+          clang-cl /nologo /EHsc /std:c++17 /D_CRT_SECURE_NO_WARNINGS /Isrc /Isrc\shim /Isrc\f2mc16 /Ivendor\vst3sdk /FIemu.h /c src\ob12_engine.cpp /Fobuild\source-check-engine.obj
+          if errorlevel 1 exit /b 1
+          clang-cl /nologo /EHsc /std:c++17 /D_CRT_SECURE_NO_WARNINGS /Isrc /c src\panel_view.cpp /Fobuild\source-check-panel.obj
+          if errorlevel 1 exit /b 1
+          clang-cl /nologo /EHsc /std:c++17 /D_CRT_SECURE_NO_WARNINGS /Isrc /Ivendor\vst3sdk /c src\ob12_vst3.cpp /Fobuild\source-check-vst3.obj
+          if errorlevel 1 exit /b 1
