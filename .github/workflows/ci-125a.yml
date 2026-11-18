@@ -28,3 +28,23 @@ jobs:
           if errorlevel 1 exit /b 1
           clang-cl /nologo /EHsc /std:c++17 /D_CRT_SECURE_NO_WARNINGS /Isrc /Ivendor\vst3sdk /c src\ob12_vst3.cpp /Fobuild\source-check-vst3.obj
           if errorlevel 1 exit /b 1
+      - name: Link real Windows VST3 library (without firmware)
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          clang-cl /nologo /EHsc /std:c++17 /D_CRT_SECURE_NO_WARNINGS /Isrc /Isrc\shim /Isrc\f2mc16 /Ibuild /FIemu.h /c src\f2mc16\f2mc16.cpp /Fobuild\f2mc16.obj
+          if errorlevel 1 exit /b 1
+          clang-cl /nologo /EHsc /std:c++17 /D_CRT_SECURE_NO_WARNINGS /Isrc /Ibuild /FIemu.h /c src\tms57070\tms57070.cpp /Fobuild\tms57070.obj
+          if errorlevel 1 exit /b 1
+          clang-cl /nologo /EHsc /std:c++17 /Ivendor\vst3sdk /c vendor\vst3sdk\pluginterfaces\base\coreiids.cpp /Fobuild\coreiids.obj
+          if errorlevel 1 exit /b 1
+          clang-cl /nologo /EHsc /std:c++17 /Ivendor\vst3sdk /c vendor\vst3sdk\pluginterfaces\base\funknown.cpp /Fobuild\funknown.obj
+          if errorlevel 1 exit /b 1
+          clang-cl /nologo /EHsc /std:c++17 /Ivendor\vst3sdk /c vendor\vst3sdk\public.sdk\source\vst\vstinitiids.cpp /Fobuild\vstinitiids.obj
+          if errorlevel 1 exit /b 1
+          clang-cl /nologo /EHsc /std:c++17 /Ivendor\vst3sdk /c tools\vst3_iids.cpp /Fobuild\vst3_iids.obj
+          if errorlevel 1 exit /b 1
+          clang-cl /nologo /LD build\source-check-vst3.obj build\source-check-panel.obj build\source-check-engine.obj build\f2mc16.obj build\tms57070.obj build\coreiids.obj build\funknown.obj build\vstinitiids.obj build\vst3_iids.obj synchronization.lib d2d1.lib dwrite.lib windowscodecs.lib user32.lib ole32.lib comdlg32.lib winmm.lib /Fe:build\OB12.vst3
+          if errorlevel 1 exit /b 1
+          if not exist build\OB12.vst3 exit /b 1
