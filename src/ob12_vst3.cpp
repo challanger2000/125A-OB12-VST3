@@ -66,6 +66,25 @@ std::string rom_folder() {
 // from 7.35 Vpp, so the path is linear: a gain and two DC blocks. The low passes (47 kHz, 70.5 kHz)
 // take about 0.5 dB at 20 kHz and are left out. The plug-in's full scale stays the DAC's, so the jack
 // level comes out 7.5 dB above it.
+// Saved inside the DAW project, not in %LOCALAPPDATA%\OB12\flash.bin.
+// Fixed-width little-endian header, followed by the exact 1-MiB Master flash image.
+struct ProjectStateHeader {
+    char magic[8];
+    uint32_t version;
+    uint32_t length;
+    uint32_t checksum;
+};
+static constexpr uint32_t flash_image_bytes = 0x100000;
+static uint32_t project_checksum(const std::vector<uint8_t>& bytes) {
+    uint32_t value = 2166136261u;
+    for (uint8_t byte : bytes) value = (value ^ byte) * 16777619u;
+    return value;
+}
+static bool stream_write_exact(IBStream* stream, const void* bytes, int32 count) {
+    int32 written = 0;
+    return stream->write(const_cast<void*>(bytes), count, &written) == kResultOk && written == count;
+}
+
 struct AnalogOut {
     static constexpr float gain = 47.5f / 20.0f;
     float x1[2] = {}, y1[2] = {}, x2[2] = {}, y2[2] = {};
@@ -94,13 +113,16 @@ struct Instrument {
     double position = 0, step = 1;  // resampling, frames of 48 kHz per host frame
     float last[2] = {}, next[2] = {};
 
-    bool start() {
+    bool start(const std::vector<uint8_t>* saved = nullptr) {
         std::string rom = rom_folder();
         if (GetFileAttributesA((rom + "\\12cpu152-CPU-v1.52-FINAL.bin").c_str()) == INVALID_FILE_ATTRIBUTES) return false;
         timeBeginPeriod(1);
         engine.reset(new Engine(rom));
-        // The unit's memory, one for every project, as on a unit: %LOCALAPPDATA%\OB12\flash.bin.
-        if (const char* base = getenv("LOCALAPPDATA")) {
+        // A saved project owns a private flash image. The legacy shared flash is only
+        // a fallback for a newly instantiated instrument without a DAW state.
+        if (saved && saved->size() == flash_image_bytes) {
+            if (!engine->restore_flash(*saved)) return false;
+        } else if (const char* base = getenv("LOCALAPPDATA")) {
             std::string folder = std::string(base) + "\\OB12";
             CreateDirectoryA(folder.c_str(), nullptr);
             engine->set_flash_file(folder + "\\flash.bin");
@@ -282,8 +304,56 @@ public:
     tresult PLUGIN_API initialize(FUnknown*) override { return kResultOk; }
     tresult PLUGIN_API terminate() override { return kResultOk; }
     tresult PLUGIN_API setComponentState(IBStream*) override { return kResultOk; }
-    tresult PLUGIN_API setState(IBStream*) override { return kResultOk; }
-    tresult PLUGIN_API getState(IBStream*) override { return kResultOk; }
+    tresult PLUGIN_API setState(IBStream* stream) override {
+        if (!stream) return kInvalidArgument;
+        ProjectStateHeader header{};
+        int32 read = 0;
+        tresult result = stream->read(&header, sizeof header, &read);
+        // Historical versions stored no component state at all.
+        if (read == 0) return kResultOk;
+        if (result != kResultOk || read != (int32)sizeof header ||
+            memcmp(header.magic, "125AOB12", 8) != 0 || header.version != 1 ||
+            header.length != flash_image_bytes) return kResultFalse;
+        std::vector<uint8_t> image(header.length);
+        read = 0;
+        result = stream->read(image.data(), (int32)image.size(), &read);
+        if (result != kResultOk || read != (int32)image.size() ||
+            project_checksum(image) != header.checksum) return kResultFalse;
+
+        std::lock_guard<std::mutex> hold(instrument_lock);
+        bool running = bool(instrument);
+        instrument.reset(); // stop the old feeder before changing its machine memory
+        project_flash = std::move(image);
+        if (running) {
+            std::unique_ptr<Instrument> fresh(new Instrument);
+            if (!fresh->start(&project_flash)) return kResultFalse;
+            instrument = std::move(fresh);
+        }
+        return kResultOk;
+    }
+    tresult PLUGIN_API getState(IBStream* stream) override {
+        if (!stream) return kInvalidArgument;
+        std::vector<uint8_t> image;
+        {
+            std::lock_guard<std::mutex> hold(instrument_lock);
+            if (instrument && instrument->engine) {
+                if (!instrument->engine->snapshot_flash(image)) return kResultFalse;
+                project_flash = image;
+            } else {
+                image = project_flash;
+            }
+        }
+        // No instance was started; legacy empty-state behaviour is valid.
+        if (image.empty()) return kResultOk;
+        if (image.size() != flash_image_bytes) return kResultFalse;
+        ProjectStateHeader header{};
+        memcpy(header.magic, "125AOB12", 8);
+        header.version = 1;
+        header.length = (uint32_t)image.size();
+        header.checksum = project_checksum(image);
+        return stream_write_exact(stream, &header, (int32)sizeof header) &&
+               stream_write_exact(stream, image.data(), (int32)image.size()) ? kResultOk : kResultFalse;
+    }
     int32 PLUGIN_API getParameterCount() override { return midi_params; }
     tresult PLUGIN_API getParameterInfo(int32 index, ParameterInfo& info) override {
         if (index < 0 || index >= midi_params) return kInvalidArgument;
@@ -492,7 +562,7 @@ public:
         std::lock_guard<std::mutex> hold(instrument_lock);
         if (!instrument) {
             auto* fresh = new Instrument;
-            if (fresh->start()) instrument.reset(fresh);
+            if (fresh->start(project_flash.empty() ? nullptr : &project_flash)) instrument.reset(fresh);
             else delete fresh;
         }
         return instrument.get();
@@ -502,6 +572,7 @@ private:
     std::atomic<uint32> refs{1};
     Facet facet{*this};
     std::unique_ptr<Instrument> instrument;
+    std::vector<uint8_t> project_flash; // exact serialized original memory
     bool raw_channel_messages = false;  // the host sends channel messages as raw MIDI data events
     std::mutex instrument_lock;
     double rate = 48000;
