@@ -104,6 +104,23 @@ jobs:
           build\vst3_norom_smoke.exe build\OB12.vst3\Contents\x86_64-win\OB12.vst3
           if errorlevel 1 exit /b 1
 
+      - name: Validate original Program and Timbre bank MIDI encoding
+        if: contains(github.event.head_commit.message, '[bank-import]')
+        shell: cmd
+        run: |
+          python tools\generate_bank_fixture.py build\OB12.vst3\Contents\x86_64-win\rom\presets build\bank-tests TT
+          if errorlevel 1 exit /b 1
+      - name: Exercise original CPU firmware bank-import and flash readback
+        if: contains(github.event.head_commit.message, '[bank-import]')
+        timeout-minutes: 16
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          clang-cl /nologo /O2 /EHsc /std:c++17 /Isrc tools\bank_import_smoke.cpp build\source-check-engine.obj build\f2mc16.obj build\tms57070.obj synchronization.lib winmm.lib user32.lib /Fe:build\bank_import_smoke.exe
+          if errorlevel 1 exit /b 1
+          build\bank_import_smoke.exe build\OB12.vst3\Contents\x86_64-win\rom build\bank-tests\12tmbTT.mid build\bank-tests\12prgTT.mid build\OB12.vst3\Contents\x86_64-win\rom\presets\12tmbFS.bin build\OB12.vst3\Contents\x86_64-win\rom\presets\12prgFS.bin
+          if errorlevel 1 exit /b 1
       - name: Package 125A Windows VST3 patch without original ROM files
         shell: pwsh
         run: |
