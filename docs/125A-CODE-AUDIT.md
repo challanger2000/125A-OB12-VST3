@@ -66,3 +66,30 @@ generated DSP assets in \`rom/\`, then run \`tools\build_125A.bat\` on Windows w
 LLVM components and Python 3 installed.
 
 This branch deliberately does not claim a verified Windows VST3 or DAW-ready release.
+
+
+---
+
+## Nachtrag 2026-11-18: P007 adversarialer Audit nach 125A-Engineering
+
+**Urteil: NO-GO / PARTIAL / NOT VERIFIED. Kein FULL AUDIT, kein QA PASS.**
+
+**Exakte Produktquelle:** feature/preset-browser-audit@04d16b5594782593d9972799fe122c165a6a40d7. Die P007-Produktquelle bleibt unveraendert. Audit-only-Pruefzweig: audit/p007-adversarial-20261118.
+
+**Inventar und Limitation:** 94 Git-Dateien (22 src, 62 tools, 1 CI, 4 docs, 5 Root), 53 Regler/Slider, 85 Taster, 96 LEDs, 10 Browser- und 7 Menue-Elemente = 251 UI/Hardware-Eintraege. Hardware-Routen statisch eindeutig, aber keine 251 Einzelwirkungen ausgefuehrt. Source-Review: Kernpfade/Hosttests untersucht, nicht jede historische CPU-/DSP-Funktion und alle Tools vollstaendig unabhaengig auditiert.
+
+**High F-01, reproduzierter Vertragsbruch:** Panel-Werksreset ruft Engine::forget_flash auf, das nur eine alte Flash-Dateireferenz loescht, nicht aber die private emulierte Flashkopie. Echter nativer Windows-Gegentest aendert Program-Flash bei 0xD0003, ruft den Resetpfad auf, misst vorher 0x46 und nachher 0x39: STILL_MUTATED=1, RESTORED=0. Die echte Positivkontrolle ueber Engine::reload(originalSnapshot) stellt das alte Image korrekt wieder her: PASS. Der neue Audit-Check beendet sich deshalb absichtlich mit Exitcode 9 und der Job ist zu Recht ROT.
+
+**Nachweis:** https://github.com/challanger2000/125A-OB12-VST3/actions/runs/44381951577. AUDIT_CONTRACT_RESET_MEMORY=FAIL; AUDIT_POSITIVE_RESTORE_CONTROL=PASS. Dagegen waren im selben Run die bisherigen Firmware-Audio-, Browser-, State- und Bank-Smokes PASS.
+
+**High F-02, Quellcode:** Plugin::process verwendet resizierbare Vectoren, stable_sort, durch midi_log() einen Mutex im Audiocallback und Engine::midi mit Mutex/Vector-Anhang. Vertrag zur Realtime-Sicherheit verletzt; p95/p99/Overrun-Messungen NOT RUN.
+**High F-03, Quellcode:** Midi sampleOffset sortiert, aber alle Ereignisse vor dem Render des gesamten Audioblocks versendet. Samplegenaue Audiobestaetigung NOT RUN.
+**High F-04, Quellcode:** panel.ob12p-Loader ohne Boundschecks fuer Recordanzahl/Kommandos, Legacy-flash.bin-Loader mit potenziell ueberlaufendem start+size vor memcpy. Crash-Execution NOT RUN.
+**Medium F-05, Quellcode:** raw_channel_messages bleibt dauerhaft aktiv und unterdrueckt spaetere VST3 ParameterChanges. Mix-Hosttest NOT RUN.
+**Medium F-06, Testadäquanz:** P007-Library-Switch-Test aendert nur Preset-Namensbytes und prueft Text/Flash/Enabled, nicht die PCM-Klangunterschiede aus sechs Originalbanken. P007-Hostfenster-Test ist eine Mock-Simulation, keine Studio-One-Abnahme.
+
+**Echte separate Offline-Positiv- und Negativkontrollen:** 12/12 originale private Programm-/Timbre-MIDI-Dateien mit unabhängigem MIDI/SysEx-Decoder geprueft (Checksummen, Adressen, Laenge, 7+1-Gruppierung). 4 absichtliche RAM-Mutationen (Checksumme, MIDI-Laenge, Adresse mit korrigierter Checksumme, fehlender Endmarker mit korrigierter Checksumme) wurden alle begruendet abgewiesen. Dies beweist das Datei-Format, NICHT den nativen C++-Klang aller Bänke.
+
+**Getrennte Gates:** P007 Windows-Basissmoke: PASS in seinem engen Umfang (run 44376294031). Factory-Reset: FAIL. Realtime-Sicherheit und MIDI-Offsets: SOURCE FAIL. Vollständige Quell-/Control-Auditdeckung: NOT VERIFIED. Steinberg-Validator: NOT RUN. 125A-Plugin-Tester: NOT RUN. Echtes Studio One 8, Multiinstanz-/Black-Border-Praxistest: NOT RUN. Exakte Audio-/Hardwarevergleiche aller Bänke: NOT RUN. Unabhaengiger Zweitpruefer: NOT RUN. RELEASE READY: NO-GO.
+
+**Folge:** Den reproduzierten Factory-Reset-Check vor weiterer Freigabe als roten Release-Gate beibehalten. P007-Produktion nicht stillschweigend mit einem GREEN-CI-Satz als FULL/FINAL bewerten. Dieser Nachtrag ist eine datierte Korrektur, der historische Bericht oben bleibt erhalten.

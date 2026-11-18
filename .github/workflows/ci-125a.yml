@@ -1,7 +1,7 @@
 name: 125A OB-12 VST3 Windows integration tests
 on:
   push:
-    branches: [feature/preset-browser-audit, audit/p007-adversarial-20261118]
+    branches: [feature/preset-browser-audit]
   workflow_dispatch:
 jobs:
   compile:
