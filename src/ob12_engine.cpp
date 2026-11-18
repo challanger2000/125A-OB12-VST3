@@ -171,6 +171,8 @@ struct Engine::Impl {
     std::mutex input_lock;
     std::atomic<bool> input_waiting{false};
     std::vector<u8> midi_bytes;
+    int bank_msb = 64, bank_lsb = 0; // channel 1, last MIDI bank select
+    std::atomic<int> selected_program{-1};
     std::vector<std::vector<u8>> pending_sysex;
     int pending_gap = 100;
     bool forget = false;
@@ -676,8 +678,34 @@ void Engine::select_preset(bool program, int bank, int slot) {
     midi(bytes, sizeof bytes);
 }
 
+int Engine::selected_preset() const {
+    return impl->selected_program.load(std::memory_order_relaxed);
+}
+
 void Engine::midi(const uint8_t* bytes, int count) {
+    if (!bytes || count <= 0) return;
     std::lock_guard<std::mutex> hold(impl->input_lock);
+    // Observe bank/program messages from the browser AND the DAW. This doesn't
+    // pretend to track selections made by buttons inside the original firmware.
+    for (int i = 0; i < count;) {
+        uint8_t status = bytes[i];
+        if (status == 0xf0) break; // SysEx payload is not channel MIDI
+        if (status == 0xb0 && i + 2 < count) {
+            if (bytes[i + 1] == 0) impl->bank_msb = bytes[i + 2];
+            if (bytes[i + 1] == 32) impl->bank_lsb = bytes[i + 2];
+            i += 3;
+        } else if (status == 0xc0 && i + 1 < count) {
+            int value = ((impl->bank_msb >= 64) ? 256 : 0) +
+                        ((impl->bank_lsb >= 64) ? 128 : 0) + bytes[i + 1];
+            if (value >= 0 && value < 512)
+                impl->selected_program.store(value, std::memory_order_relaxed);
+            i += 2;
+        } else if ((status & 0xf0) == 0xc0 || (status & 0xf0) == 0xd0) {
+            i += std::min(2, count - i);
+        } else if (status >= 0x80 && status < 0xf0) {
+            i += std::min(3, count - i);
+        } else ++i;
+    }
     impl->midi_bytes.insert(impl->midi_bytes.end(), bytes, bytes + count);
     impl->input_waiting = true;
 }

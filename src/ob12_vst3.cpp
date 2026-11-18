@@ -73,6 +73,7 @@ struct ProjectStateHeader {
     uint32_t version;
     uint32_t length;
     uint32_t checksum;
+    int32_t selected_preset; // -1 unknown, otherwise type*256 + bank*128 + slot
 };
 static constexpr uint32_t flash_image_bytes = 0x100000;
 static uint32_t project_checksum(const std::vector<uint8_t>& bytes) {
@@ -113,7 +114,7 @@ struct Instrument {
     double position = 0, step = 1;  // resampling, frames of 48 kHz per host frame
     float last[2] = {}, next[2] = {};
 
-    bool start(const std::vector<uint8_t>* saved = nullptr) {
+    bool start(const std::vector<uint8_t>* saved = nullptr, int preset = -1) {
         std::string rom = rom_folder();
         if (GetFileAttributesA((rom + "\\12cpu152-CPU-v1.52-FINAL.bin").c_str()) == INVALID_FILE_ATTRIBUTES) return false;
         timeBeginPeriod(1);
@@ -127,11 +128,16 @@ struct Instrument {
             CreateDirectoryA(folder.c_str(), nullptr);
             engine->set_flash_file(folder + "\\flash.bin");
         }
-        feeder = std::thread([this]() {
+        feeder = std::thread([this, preset]() {
+            bool preset_restored = false;
             std::vector<int32_t> block(240 * 2);
             while (!stop) {
                 uint32_t fill = written.load(std::memory_order_relaxed) - read.load(std::memory_order_acquire);
                 bool ready = engine->sounding_ready();
+                if (ready && !preset_restored && preset >= 0 && preset < 512) {
+                    engine->select_preset(preset >= 256, (preset % 256) / 128, preset % 128);
+                    preset_restored = true;
+                }
                 if (ready && fill >= (uint32_t)lead_frames) { Sleep(1); continue; }
                 engine->run(block.data(), 240);
                 if (!ready) continue;
@@ -390,7 +396,7 @@ public:
         // Historical versions stored no component state at all.
         if (read == 0) return kResultOk;
         if (result != kResultOk || read != (int32)sizeof header ||
-            memcmp(header.magic, "125AOB12", 8) != 0 || header.version != 1 ||
+            memcmp(header.magic, "125AOB12", 8) != 0 || header.version != 2 ||
             header.length != flash_image_bytes) return kResultFalse;
         std::vector<uint8_t> image(header.length);
         read = 0;
@@ -398,13 +404,15 @@ public:
         if (result != kResultOk || read != (int32)image.size() ||
             project_checksum(image) != header.checksum) return kResultFalse;
 
+        if (header.selected_preset < -1 || header.selected_preset >= 512) return kResultFalse;
         std::lock_guard<std::mutex> hold(instrument_lock);
         bool running = bool(instrument);
         instrument.reset(); // stop the old feeder before changing its machine memory
         project_flash = std::move(image);
+        project_preset = header.selected_preset;
         if (running) {
             std::unique_ptr<Instrument> fresh(new Instrument);
-            if (!fresh->start(&project_flash)) return kResultFalse;
+            if (!fresh->start(&project_flash, project_preset)) return kResultFalse;
             instrument = std::move(fresh);
         }
         return kResultOk;
@@ -417,6 +425,7 @@ public:
             if (instrument && instrument->engine) {
                 if (!instrument->engine->snapshot_flash(image)) return kResultFalse;
                 project_flash = image;
+                project_preset = instrument->engine->selected_preset();
             } else {
                 image = project_flash;
             }
@@ -426,9 +435,10 @@ public:
         if (image.size() != flash_image_bytes) return kResultFalse;
         ProjectStateHeader header{};
         memcpy(header.magic, "125AOB12", 8);
-        header.version = 1;
+        header.version = 2;
         header.length = (uint32_t)image.size();
         header.checksum = project_checksum(image);
+        header.selected_preset = project_preset;
         return stream_write_exact(stream, &header, (int32)sizeof header) &&
                stream_write_exact(stream, image.data(), (int32)image.size()) ? kResultOk : kResultFalse;
     }
@@ -562,7 +572,7 @@ public:
         std::lock_guard<std::mutex> hold(instrument_lock);
         if (!instrument) {
             auto* fresh = new Instrument;
-            if (fresh->start(project_flash.empty() ? nullptr : &project_flash)) instrument.reset(fresh);
+            if (fresh->start(project_flash.empty() ? nullptr : &project_flash, project_preset)) instrument.reset(fresh);
             else delete fresh;
         }
         return instrument.get();
@@ -573,6 +583,7 @@ private:
     Facet facet{*this};
     std::unique_ptr<Instrument> instrument;
     std::vector<uint8_t> project_flash; // exact serialized original memory
+    int project_preset = -1;
     bool raw_channel_messages = false;  // the host sends channel messages as raw MIDI data events
     std::mutex instrument_lock;
     double rate = 48000;
