@@ -64,7 +64,7 @@ struct Frame final : IPlugFrame {
     }
 };
 
-static void test_scale(IComponent* component) {
+static bool test_scale(IComponent* component) {
     IEditController* controller = nullptr;
     component->queryInterface(IEditController::iid, (void**)&controller);
     IPlugView* view = controller->createView(ViewType::kEditor);
@@ -87,6 +87,43 @@ static void test_scale(IComponent* component) {
     if (const char* p = getenv("OB12_PANEL_SHOT_PERCENT")) SendMessageW(child, WM_COMMAND, 1000 + atoi(p), 0);
     if (getenv("OB12_PANEL_SHOT")) SendMessageW(child, WM_COMMAND, 1999, 0);  // the panel saves itself, off screen
     SendMessageW(child, WM_COMMAND, 1000 + 75, 0);
+    // Open 125A's real browser through the original panel's right-click menu handler.
+    // Test the actual Win32 controls rather than a mocked list or a screenshot.
+    bool browser_ok = false;
+    SendMessageW(child, WM_COMMAND, MAKEWPARAM(1503, 0), 0);
+    HWND browser = FindWindowW(L"125A_OB12_PresetBrowser", nullptr);
+    if (browser) {
+        HWND ty = GetDlgItem(browser, 3101);
+        HWND bk = GetDlgItem(browser, 3102);
+        HWND list = GetDlgItem(browser, 3104);
+        HWND library = GetDlgItem(browser, 3110);
+        int initial = list ? (int)SendMessageW(list, LB_GETCOUNT, 0, 0) : -1;
+        int types = ty ? (int)SendMessageW(ty, CB_GETCOUNT, 0, 0) : -1;
+        int banks = bk ? (int)SendMessageW(bk, CB_GETCOUNT, 0, 0) : -1;
+        int collections = library ? (int)SendMessageW(library, CB_GETCOUNT, 0, 0) : -1;
+        if (bk) {
+            SendMessageW(bk, CB_SETCURSEL, 1, 0);
+            SendMessageW(browser, WM_COMMAND, MAKEWPARAM(3102, CBN_SELCHANGE), (LPARAM)bk);
+        }
+        if (ty) {
+            SendMessageW(ty, CB_SETCURSEL, 1, 0);
+            SendMessageW(browser, WM_COMMAND, MAKEWPARAM(3101, CBN_SELCHANGE), (LPARAM)ty);
+        }
+        int after = list ? (int)SendMessageW(list, LB_GETCOUNT, 0, 0) : -1;
+        if (list && after == 128) {
+            SendMessageW(list, LB_SETCURSEL, 6, 0);
+            SendMessageW(browser, WM_COMMAND, MAKEWPARAM(3104, LBN_SELCHANGE), (LPARAM)list);
+        }
+        wchar_t status[160] = {};
+        if (HWND label = GetDlgItem(browser, 3109)) GetWindowTextW(label, status, 160);
+        browser_ok = initial == 128 && after == 128 && types == 2 && banks == 2 &&
+                     collections >= 1 && wcsstr(status, L"Timbre") != nullptr;
+        printf("BROWSER_TEST=%s slots=%d/%d types=%d banks=%d soundbank_options=%d\n",
+               browser_ok ? "PASS" : "FAIL", initial, after, types, banks, collections);
+        DestroyWindow(browser);
+    } else {
+        puts("BROWSER_TEST=FAIL (window not created)");
+    }
     view->removed();
     view->release();
     IPlugView* again = controller->createView(ViewType::kEditor);
@@ -95,6 +132,7 @@ static void test_scale(IComponent* component) {
     again->release();
     DestroyWindow(parent);
     controller->release();
+    return browser_ok;
 }
 
 int main(int, char** argv) {
@@ -196,10 +234,10 @@ int main(int, char** argv) {
     }
     const bool audio_ok = first_sound > 10.0 && first_sound < 17.0 && frames > 0 && sum / frames > 1e-9;
     printf("AUDIO_TEST=%s\n", audio_ok ? "PASS" : "FAIL");
-    test_scale(component);
+    const bool browser_ok = test_scale(component);
     audio->setProcessing(false);
     component->setActive(false);
     component->terminate();
     component->release();
-    return audio_ok ? 0 : 2;
+    return audio_ok && browser_ok ? 0 : 2;
 }
