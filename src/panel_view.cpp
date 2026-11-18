@@ -110,6 +110,7 @@ struct PanelView::Impl {
     ID2D1SolidColorBrush* brush = nullptr;
     std::vector<Run> runs;
     float art_w = 472, art_h = 126;
+    bool valid_art = false;
     std::function<void(int)> width_request;
     std::function<void(void*)> host_size_check;
     int frame_ticks = 0;
@@ -187,6 +188,7 @@ struct PanelView::Impl {
         art_w = new_w;
         art_h = new_h;
         runs.swap(parsed);
+        valid_art = true;
         fix_art();
     }
 
@@ -1097,6 +1099,7 @@ int PanelView::output_gain_db() {
 float PanelView::output_gain() { return powf(10.f, output_gain_db() / 20.f); }
 
 float PanelView::aspect() const { return impl->art_w * (1 + panel_c_w / panel_frame_w) / impl->art_h; }
+bool PanelView::has_valid_art() const { return impl->valid_art; }
 
 void PanelView::on_width_request(std::function<void(int)> request) { impl->width_request = std::move(request); }
 void PanelView::on_host_size_check(std::function<void(void*)> check) { impl->host_size_check = std::move(check); }

@@ -6,11 +6,103 @@
 // This deliberately returns non-zero while the product violates the contract.
 // A RED audit CI job is evidence of the defect, not a failed source compilation.
 #include "ob12_engine.h"
+#include "panel_view.h"
 #include <algorithm>
+#include <fstream>
+#include <cstring>
+#include <cmath>
 #include <cstdio>
 #include <cstdint>
 #include <string>
 #include <vector>
+
+
+// Test only: write user-owned temporary files under the ephemeral CI directory.
+static void u32(std::ofstream& out, uint32_t value) {
+    out.write(reinterpret_cast<const char*>(&value), 4);
+}
+static bool audit_legacy_flash(const std::string& rom,
+                               const std::vector<uint8_t>& base) {
+    const std::string path = "build/audit-p007-legacy-memory.bin";
+    constexpr uint32_t at = 0xD0003;
+    const uint8_t changed = base[at] ^ 0x55;
+    auto probe = [&](int kind, bool expect_changed) {
+        {
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            if (!out) return false;
+            out.write("OB12FLSH", 8);
+            if (kind == 0) { // valid 1-byte transaction: positive parser control
+                u32(out, at); u32(out, 1); out.put((char)changed);
+            } else if (kind == 1) { // 32-bit wrapping start+size bypass attempt
+                u32(out, 0xFFFFFFF0u); u32(out, 0x20u);
+                for (int i=0;i<32;++i) out.put((char)0xCC);
+            } else if (kind == 2) { // first valid record, then truncated second
+                u32(out, at); u32(out, 1); out.put((char)changed);
+                u32(out, 0xC0000); out.put((char)0x1u);
+            } else if (kind == 3) { // overlapping duplicate update
+                u32(out, at); u32(out, 1); out.put((char)changed);
+                u32(out, at); u32(out, 1); out.put((char)0xAA);
+            } else if (kind == 4) { // a declared 1MiB payload truncated at 1 byte
+                u32(out, 0); u32(out, 0x100000u); out.put((char)0);
+            } else return false;
+        }
+        Engine loaded(rom);
+        loaded.set_flash_file(path);
+        std::vector<uint8_t> snapshot;
+        const bool captured = loaded.snapshot_flash(snapshot);
+        const bool passed = captured &&
+            snapshot.size() == base.size() &&
+            (expect_changed ? snapshot[at] == changed : snapshot == base);
+        std::printf("AUDIT_LEGACY_FLASH_%d=%s expected_change=%d\n",
+                    kind,passed ? "PASS" : "FAIL",(int)expect_changed);
+        std::remove(path.c_str());
+        return passed;
+    };
+    for (int k=0;k<=4;++k)
+        if (!probe(k, k == 0)) return false;
+    std::puts("AUDIT_LEGACY_FLASH_BOUNDS_AND_ROLLBACK=PASS");
+    return true;
+}
+static bool audit_panel_art(const std::string& rom, Engine& e) {
+    const std::string stock = rom + "/panel.ob12p";
+    std::ifstream input(stock, std::ios::binary);
+    std::vector<char> bytes((std::istreambuf_iterator<char>(input)), {});
+    if (bytes.size()<32) return false;
+    PanelView known(e, stock);
+    if (!known.has_valid_art()) {
+        std::puts("AUDIT_PANEL_POSITIVE_CONTROL=FAIL original art rejected");
+        return false;
+    }
+    const std::string path = "build/audit-p007-corrupt-panel.ob12p";
+    for (int kind=0;kind<4;++kind) {
+        std::vector<char> broken=bytes;
+        if (kind==0) broken.resize(16); // valid header but missing run bodies
+        else if (kind==1) {
+            uint32_t huge=0xFFFFFFFFu;
+            std::memcpy(broken.data()+4,&huge,4); // count causes huge allocation
+        } else if (kind==2) {
+            float bad = std::nanf("");
+            std::memcpy(broken.data()+8,&bad,4); // invalid image width
+        } else {
+            // First run has only its fixed header; its fake command count
+            // must never cause a pointer walk past the actual data.
+            uint32_t too_many=0xFFFFFFFEu;
+            std::memcpy(broken.data()+16+4+1+4,&too_many,4);
+        }
+        {
+            std::ofstream o(path,std::ios::binary|std::ios::trunc);
+            o.write(broken.data(),(std::streamsize)broken.size());
+        }
+        PanelView candidate(e,path);
+        bool rejected=!candidate.has_valid_art();
+        std::printf("AUDIT_PANEL_CORRUPT_%d=%s\n",
+                    kind,rejected?"PASS":"FAIL");
+        std::remove(path.c_str());
+        if (!rejected) return false;
+    }
+    std::puts("AUDIT_PANEL_BOUNDED_PARSER=PASS");
+    return true;
+}
 
 int main(int argc, char** argv) {
     if (argc != 2) { std::puts("usage: audit_p007_adversarial <rom>"); return 2; }
@@ -114,6 +206,8 @@ int main(int argc, char** argv) {
                   (unsigned)after_boot[0xD0003] : 0u,
                 (unsigned)baseline[0xD0003],(int)cold.sounding_ready());
     if (!boot_ok) return 13;
+    if (!audit_legacy_flash(argv[1],baseline)) return 16;
+    if (!audit_panel_art(argv[1],e)) return 17;
 
     // A queued original SysEx transmission must reject an external
     // direct-install operation atomically, not only reject factory reset.

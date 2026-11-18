@@ -13,6 +13,7 @@ public:
     void detach();
     void resize(int width, int height);
     float aspect() const;  // width over height of the art
+    bool has_valid_art() const;  // loaded and bounded-validated binary panel art
     // The right click menu offers sizes; the owner resizes the window and calls resize().
     void on_width_request(std::function<void(int width)> request);
     // Invoked after the editor has returned from attached(). The host can

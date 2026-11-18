@@ -134,7 +134,7 @@ jobs:
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           if errorlevel 1 exit /b 1
-          clang-cl /nologo /O2 /EHsc /std:c++17 /Isrc tools\audit_p007_adversarial.cpp build\source-check-engine.obj build\f2mc16.obj build\tms57070.obj synchronization.lib winmm.lib user32.lib /Fe:build\audit_p007_adversarial.exe
+          clang-cl /nologo /O2 /EHsc /std:c++17 /Isrc tools\audit_p007_adversarial.cpp build\source-check-panel.obj build\source-check-engine.obj build\f2mc16.obj build\tms57070.obj synchronization.lib winmm.lib user32.lib gdi32.lib d2d1.lib dwrite.lib windowscodecs.lib ole32.lib comdlg32.lib /Fe:build\audit_p007_adversarial.exe
           if errorlevel 1 exit /b 1
           build\audit_p007_adversarial.exe build\OB12.vst3\Contents\x86_64-win\rom
           if errorlevel 1 exit /b 1
