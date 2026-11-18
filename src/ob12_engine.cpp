@@ -273,7 +273,10 @@ struct Engine::Impl {
         long now = m->flash_erases + m->flash_programs;
         flash_count.store(now, std::memory_order_relaxed);
         if (now != flash_seen) { flash_seen = now; flash_changed_at = k; flash_dirty = true; }
-        else if (flash_dirty && k - flash_changed_at > 96000) save_flash();
+        else if (flash_dirty && k - flash_changed_at > 96000) {
+            if (!flash_path.empty()) save_flash();
+            else flash_dirty = false; // keep the project snapshot as sole persistence
+        }
     }
     long ready_at = 0;  // half frame the Slave had answered
 
@@ -326,7 +329,7 @@ struct Engine::Impl {
             s->ppg_tick();
             s->reload_tick();
             take_inputs();
-            if (!flash_path.empty()) watch_flash();
+            watch_flash(); // observe firmware writes even for project-private flash
             sysex_step();
             drain_out();
             if (k % 3072 == 0) {
