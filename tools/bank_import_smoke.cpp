@@ -16,11 +16,13 @@ static std::vector<uint8_t> read_binary(const std::string& path) {
 }
 
 int main(int argc,char** argv) {
-    if (argc != 6) {
-        puts("usage: bank_import_smoke <romdir> <tmb.mid> <prg.mid> <tmb.bin> <prg.bin>");
+    if (argc != 7) {
+        puts("usage: bank_import_smoke <romdir> <tmb.mid> <prg.mid> <tmb.bin> <prg.bin> <program|timbre|pair>");
         return 2;
     }
     const std::string romdir = argv[1];
+    const std::string mode=argv[6];
+    if(mode!="program" && mode!="timbre" && mode!="pair") return 2;
     std::vector<uint8_t> tmb,prg;
     const std::string tmb_error = Engine::read_sysex(std::wstring(argv[2],argv[2]+strlen(argv[2])),tmb);
     const std::string prg_error = Engine::read_sysex(std::wstring(argv[3],argv[3]+strlen(argv[3])),prg);
@@ -46,12 +48,14 @@ int main(int argc,char** argv) {
         return 5;
     }
     long baseline=e.flash_writes();
-    printf("BANK_TEST_START boot_writes=%ld sysex_bytes=%zu/%zu\n",baseline,tmb.size(),prg.size());
+    printf("BANK_TEST_START mode=%s boot_writes=%ld sysex_bytes=%zu/%zu\n",mode.c_str(),baseline,tmb.size(),prg.size());
     fflush(stdout);
     // Firmware updates may reboot the instrument after each section. Test the
     // exact browser's current FIFO implementation rather than pretending that
     // independent stages have already been proven.
-    e.send_sysex_pair(tmb.data(),(int)tmb.size(),prg.data(),(int)prg.size(),10);
+    if(mode=="pair") e.send_sysex_pair(tmb.data(),(int)tmb.size(),prg.data(),(int)prg.size(),10);
+    else if(mode=="program") e.send_sysex(prg.data(),(int)prg.size(),10);
+    else e.send_sysex(tmb.data(),(int)tmb.size(),10);
     bool seen_pending=false;
     bool drained=false;
     int drained_at=-1;
@@ -98,8 +102,11 @@ int main(int argc,char** argv) {
     printf("TIMBRE_FIRMWARE_NORMALIZATION=%s\n", normalized ? "ONE_BYTE_ACCEPTED" : "NONE");
     const bool prg_ok=compare(expected_prg,0xD0000,"PROGRAM");
     long writes=e.flash_writes()-baseline;
+    const long min_writes = mode=="pair" ? 40000 : mode=="timbre" ? 21000 : 20000;
+    const bool regions_ok = (mode=="pair" && tmb_ok && prg_ok) ||
+                            (mode=="program" && prg_ok) || (mode=="timbre" && tmb_ok);
     const bool success=seen_pending&&drained&&e.sounding_ready()&&
-                       writes>=40000&&tmb_ok&&prg_ok;
+                       writes>=min_writes&&regions_ok;
     printf("BANK_IMPORT_TEST=%s seen_pending=%d drained=%d writes=%ld timbre_bytes=%s program_bytes=%s ready=%d\n",
         success?"PASS":"FAIL",seen_pending,drained,writes,tmb_ok?"PASS":"FAIL",
         prg_ok?"PASS":"FAIL",e.sounding_ready());
