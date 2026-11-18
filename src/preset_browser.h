@@ -386,13 +386,16 @@ private:
         }
         const BankPair& bank = bank_pairs_[index];
         std::vector<uint8_t> bytes;
-        std::vector<unsigned char> image;
+        std::vector<uint8_t> image;
         int count = 0;
         for (int type = 0; type < 2; ++type) {
             const std::wstring& path = type == 0 ? bank.program_path : bank.timbre_path;
             bytes.clear();
             image.clear();
-            if (Engine::read_sysex(path, bytes).empty() && decode_bank(bytes, image) &&
+            uint32_t flash_address = 0;
+            if (Engine::read_sysex(path, bytes).empty() &&
+                Engine::decode_bank(bytes, image, flash_address).empty() &&
+                flash_address == (type == 0 ? 0xD0000u : 0xC0000u) &&
                 scan_names(type, image, &preview_names_[type])) ++count;
         }
         if (title_) SetWindowTextW(title_, L"125A  /  OB-12 PRESET BROWSER  |  LIBRARY PREVIEW (NOT LOADED)");
@@ -456,21 +459,57 @@ private:
         };
         if (!read(program_file, programs) || !read(timbre_file, timbres)) return;
 
-        if (MessageBoxW(window_,
-             L"The original OB-12 firmware will write these sounds into its flash memory. "
-             L"This can overwrite the current Programs and Timbres.\n\n"
-             L"Back up your current DAW project first. Import now?",
-             L"Confirm OB-12 bank import", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES)
+        if (!timbres.empty()) {
+            std::vector<uint8_t> program_image, timbre_image;
+            uint32_t program_at = 0, timbre_at = 0;
+            const std::string pe = Engine::decode_bank(programs, program_image, program_at);
+            const std::string te = Engine::decode_bank(timbres, timbre_image, timbre_at);
+            if (!pe.empty() || !te.empty() || program_at != 0xD0000 ||
+                timbre_at != 0xC0000) {
+                std::wstring why = wide(!pe.empty() ? pe : !te.empty() ? te :
+                                        "Bank file targets an unexpected flash address");
+                MessageBoxW(window_, why.c_str(), L"Unsupported OB-12 bank data", MB_OK | MB_ICONERROR);
+                return;
+            }
+            if (MessageBoxW(window_,
+                 L"Load the selected 256 Programs and 256 Timbres into THIS plugin instance's "
+                 L"private Flash memory? Existing patches in these two banks will be replaced. "
+                 L"The original CPU/DSP sound engine remains unchanged.\n\n"
+                 L"Save a backup of your project before proceeding.",
+                 L"Confirm 125A soundbank installation",
+                 MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
+            if (!engine_.apply_bank_pair(program_image, timbre_image)) {
+                MessageBoxW(window_, L"Unable to change flash during another hardware update.",
+                            L"Soundbank not installed", MB_ICONERROR);
+                return;
+            }
+            // Apply is atomic with respect to the emulation thread. The firmware
+            // reads the freshly installed data on the next MIDI preset change.
+            preview_active_ = false;
+            if (library_) SendMessageW(library_, CB_SETCURSEL, 0, 0);
+            if (title_) SetWindowTextW(title_,
+                L"125A  /  OB-12 PRESET BROWSER  |  ACTIVE MEMORY");
+            if (list_) EnableWindow(list_, TRUE);
+            last_index_writes_ = -1;
+            sync_live_names();
+            int selected = engine_.selected_preset();
+            if (selected < 0) selected = 256; // default Program A-001
+            engine_.select_preset(selected >= 256, (selected % 256) / 128, selected % 128);
+            text_status(L"Both complete banks installed into private flash. Presets are ready.");
             return;
-
-        // Timbres first, then the Programs which reference them. Do not show the
-        // imported names until the original firmware has really written its flash.
+        }
+        // Keep support for standalone original .syx files through the original UART.
+        if (MessageBoxW(window_,
+             L"Send this standalone SysEx file through the emulated OB-12 MIDI input? "
+             L"The original firmware controls this transfer and may overwrite memory.\n\n"
+             L"Proceed only if you know the purpose of this file.",
+             L"Original OB-12 SysEx transfer",
+             MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
         first_transfer_writes_ = observed_transfer_writes_ = engine_.flash_writes();
         transfer_started_ = last_flash_activity_ = GetTickCount64();
         transferring_ = true;
-        engine_.send_sysex_pair(timbres.data(), (int)timbres.size(),
-                                programs.data(), (int)programs.size());
-        text_status(L"Transferring original-format Program/Timbre bank; preset selection locked.");
+        engine_.send_sysex(programs.data(), (int)programs.size());
+        text_status(L"Original SysEx transfer queued. Do not change presets or save yet.");
     }
     void create_widgets() {
         HINSTANCE inst = GetModuleHandleW(nullptr);
