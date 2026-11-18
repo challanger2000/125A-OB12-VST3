@@ -68,8 +68,8 @@ def main():
     if len(sys.argv) != 4:
         sys.exit("usage: generate_bank_fixture.py <original rom/presets> <output folder> <suffix>")
     rom, target, suffix = pathlib.Path(sys.argv[1]),pathlib.Path(sys.argv[2]),sys.argv[3]
-    if len(suffix)!=2 or not suffix.isalnum():
-        sys.exit("suffix must be two ASCII alphanumeric characters")
+    if not 2 <= len(suffix) <= 8 or not suffix.isalnum():
+        sys.exit("suffix must be 2 to 8 ASCII alphanumeric characters")
     target.mkdir(parents=True,exist_ok=True)
     midi_bank.va2 = suffix.upper() == "VA2"
     for kind,base,nbytes,label in (("prg",0xD0000,40448,"PROGRAM"),
