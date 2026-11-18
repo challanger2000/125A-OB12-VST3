@@ -113,13 +113,11 @@ private:
     // The stock image contains 256 fixed-size slots. The position of the ASCII name
     // is NOT assumed: find a common offset with readable, distinctive names.
     // Fail closed (display slot numbers) if the image does not meet confidence checks.
-    void load_names(int type, const std::string& path) {
-        std::ifstream file(path, std::ios::binary);
-        if (!file) return;
-        const std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(file)), {});
-        if (bytes.empty() || bytes.size() % 256 != 0) return;
+    bool scan_names(int type, const std::vector<unsigned char>& bytes) {
+        if (type < 0 || type > 1 || bytes.empty() || bytes.size() % 256 != 0)
+            return false;
         size_t stride = bytes.size() / 256;
-        if (stride < 16 || stride > 4096) return;
+        if (stride < 16 || stride > 4096) return false;
         int best_score = -1;
         std::array<std::string, 256> best{};
         for (size_t offset = 0; offset + 4 < stride; ++offset) {
@@ -140,7 +138,57 @@ private:
                 best = std::move(candidate);
             }
         }
-        if (best_score >= 0) names_[type] = std::move(best);
+        if (best_score < 0) return false;
+        names_[type] = std::move(best);
+        return true;
+    }
+    void load_names(int type, const std::string& path) {
+        std::ifstream file(path, std::ios::binary);
+        if (!file) return;
+        const std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(file)), {});
+        scan_names(type, bytes);
+    }
+    // Decode the standard 7+1 byte packaging in Viscount's OB-12 update
+    // records. Works on an Engine::read_sysex stream (F0...F7 messages).
+    // This is for *catalogue titles only*. The firmware remains responsible
+    // for interpreting, validating and storing the actual bank data.
+    static bool decode_bank(const std::vector<uint8_t>& sysex,
+                            std::vector<unsigned char>& image) {
+        image.clear();
+        size_t at = 0;
+        bool any = false;
+        while (at < sysex.size()) {
+            if (sysex[at] != 0xf0) return false;
+            size_t end = at + 1;
+            while (end < sysex.size() && sysex[end] != 0xf7) ++end;
+            if (end >= sysex.size() || end < at + 7) return false;
+            if (sysex[at + 1] != 0x31 || sysex[at + 2] != 0x30 ||
+                sysex[at + 3] != 0x00) return false;
+            int check = 0;
+            for (size_t i = at + 1; i < end - 1; ++i) check += sysex[i];
+            if (((~check) & 0x7f) != sysex[end - 1]) return false;
+            if (sysex[at + 4] == 0x7f) {
+                if (end < at + 13) return false;
+                int expected = sysex[at + 10];
+                std::vector<unsigned char> record;
+                for (size_t p = at + 11; p < end - 1;) {
+                    size_t remaining = end - 1 - p;
+                    size_t group = std::min((size_t)8, remaining);
+                    if (group < 2) return false;
+                    unsigned char upper = sysex[p + group - 1];
+                    for (size_t i = 0; i + 1 < group; ++i)
+                        record.push_back((unsigned char)(sysex[p + i] |
+                                      ((upper & (1u << i)) ? 0x80 : 0)));
+                    p += group;
+                }
+                if (expected > (int)record.size()) return false;
+                if (image.size() + (size_t)expected > 8u * 1024u * 1024u) return false;
+                image.insert(image.end(), record.begin(), record.begin() + expected);
+                any = true;
+            }
+            at = end + 1;
+        }
+        return any;
     }
     std::string favorites_file() const {
         const char* appdata = getenv("LOCALAPPDATA");
@@ -234,18 +282,65 @@ private:
         dlg.lpstrFilter = L"OB-12 SysEx / MIDI bank (*.syx;*.mid)\0*.syx;*.mid\0All files\0*.*\0";
         dlg.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
         if (!GetOpenFileNameW(&dlg)) return;
-        std::vector<uint8_t> bytes;
-        std::string error = Engine::read_sysex(path, bytes);
-        if (!error.empty()) {
-            MessageBoxW(window_, wide(error).c_str(), L"Bank import failed", MB_ICONERROR);
-            return;
+        std::wstring chosen(path);
+        std::wstring filename = chosen.substr(chosen.find_last_of(L"\\/") + 1);
+        std::wstring small = lower(filename);
+        bool is_program = small.size() == 11 && small.substr(0, 5) == L"12prg" &&
+                          small.substr(7) == L".mid";
+        bool is_timbre = small.size() == 11 && small.substr(0, 5) == L"12tmb" &&
+                         small.substr(7) == L".mid";
+
+        std::wstring program_file, timbre_file;
+        if (is_program || is_timbre) {
+            std::wstring dir = chosen.substr(0, chosen.find_last_of(L"\\/") + 1);
+            std::wstring id = filename.substr(5, 2);
+            program_file = dir + L"12prg" + id + L".mid";
+            timbre_file = dir + L"12tmb" + id + L".mid";
+            if (GetFileAttributesW(program_file.c_str()) == INVALID_FILE_ATTRIBUTES ||
+                GetFileAttributesW(timbre_file.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                MessageBoxW(window_,
+                    L"A matching 12prgXX.mid and 12tmbXX.mid pair is required. "
+                    L"Both files must be in the same folder.",
+                    L"Incomplete OB-12 soundbank", MB_OK | MB_ICONWARNING);
+                return;
+            }
+        } else {
+            // Standalone .syx files are supported too; they can overwrite memory.
+            program_file = chosen;
         }
+
+        std::vector<uint8_t> programs, timbres;
+        auto read = [&](const std::wstring& file, std::vector<uint8_t>& bytes) {
+            if (file.empty()) return true;
+            std::string error = Engine::read_sysex(file, bytes);
+            if (error.empty()) return true;
+            MessageBoxW(window_, wide(error).c_str(), L"Invalid SysEx bank", MB_ICONERROR);
+            return false;
+        };
+        if (!read(program_file, programs) || !read(timbre_file, timbres)) return;
+
         if (MessageBoxW(window_,
-             L"Importing this bank into the original OB-12 flash may overwrite existing "
-             L"Programs/Timbres. This is NOT a separate read-only browser library.\n\nContinue?",
-             L"Confirm bank import", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
-        engine_.send_sysex(bytes.data(), (int)bytes.size());
-        text_status(L"Bank queued for original MIDI SysEx import. Existing memory may be replaced.");
+             L"The original OB-12 firmware will write these sounds into its flash memory. "
+             L"This can overwrite the current Programs and Timbres.\n\n"
+             L"Back up your current DAW project first. Import now?",
+             L"Confirm OB-12 bank import", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES)
+            return;
+
+        // Timbres first, then the Programs which reference them.
+        if (!timbres.empty()) engine_.send_sysex(timbres.data(), (int)timbres.size());
+        if (!programs.empty()) engine_.send_sysex(programs.data(), (int)programs.size());
+
+        std::vector<unsigned char> image;
+        if (!timbres.empty()) {
+            names_[1].fill({});
+            if (decode_bank(timbres, image)) scan_names(1, image);
+        }
+        if (!programs.empty()) {
+            names_[0].fill({});
+            if (decode_bank(programs, image)) scan_names(0, image);
+        }
+        fill();
+        text_status(L"Bank import queued. Wait for MIDI transfer to complete before browsing.");
     }
     void create_widgets() {
         HINSTANCE inst = GetModuleHandleW(nullptr);
@@ -263,7 +358,7 @@ private:
                                             WS_BORDER | WS_TABSTOP, id_list);
         favorite_ = control(L"BUTTON", L"Toggle favorite", BS_PUSHBUTTON | WS_TABSTOP, id_favorite);
         only_favorites_ = control(L"BUTTON", L"Only favorites", BS_AUTOCHECKBOX | WS_TABSTOP, id_only_favorites);
-        import_ = control(L"BUTTON", L"Import .syx / .mid", BS_PUSHBUTTON | WS_TABSTOP, id_import);
+        import_ = control(L"BUTTON", L"Load Bank Pair", BS_PUSHBUTTON | WS_TABSTOP, id_import);
         close_ = control(L"BUTTON", L"Close", BS_PUSHBUTTON | WS_TABSTOP, id_close);
         status_ = control(L"STATIC", L"Select an entry. Program Map must be disabled on the OB-12.", SS_LEFT, id_status);
         SendMessageW(type_, CB_ADDSTRING, 0, (LPARAM)L"Programs");
