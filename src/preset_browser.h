@@ -67,6 +67,7 @@ private:
     std::string rom_dir_;
     HWND window_ = nullptr, type_ = nullptr, bank_ = nullptr, search_ = nullptr;
     HWND list_ = nullptr, status_ = nullptr, favorite_ = nullptr, only_favorites_ = nullptr;
+    HWND title_ = nullptr, import_ = nullptr, close_ = nullptr;
     HBRUSH background_ = nullptr, field_brush_ = nullptr;
     HFONT font_ = nullptr;
     std::array<std::array<std::string, 256>, 2> names_{};
@@ -254,7 +255,7 @@ private:
             if (font_ && hwnd) SendMessageW(hwnd, WM_SETFONT, (WPARAM)font_, TRUE);
             return hwnd;
         };
-        control(L"STATIC", L"125A  /  OB-12 PRESET BROWSER", SS_LEFT, 0);
+        title_ = control(L"STATIC", L"125A  /  OB-12 PRESET BROWSER", SS_LEFT, 0);
         type_ = control(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, id_type);
         bank_ = control(L"COMBOBOX", L"", CBS_DROPDOWNLIST, id_bank);
         search_ = control(L"EDIT", L"", ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, id_search);
@@ -262,8 +263,8 @@ private:
                                             WS_BORDER | WS_TABSTOP, id_list);
         favorite_ = control(L"BUTTON", L"Toggle favorite", BS_PUSHBUTTON | WS_TABSTOP, id_favorite);
         only_favorites_ = control(L"BUTTON", L"Only favorites", BS_AUTOCHECKBOX | WS_TABSTOP, id_only_favorites);
-        control(L"BUTTON", L"Import .syx / .mid", BS_PUSHBUTTON | WS_TABSTOP, id_import);
-        control(L"BUTTON", L"Close", BS_PUSHBUTTON | WS_TABSTOP, id_close);
+        import_ = control(L"BUTTON", L"Import .syx / .mid", BS_PUSHBUTTON | WS_TABSTOP, id_import);
+        close_ = control(L"BUTTON", L"Close", BS_PUSHBUTTON | WS_TABSTOP, id_close);
         status_ = control(L"STATIC", L"Select an entry. Program Map must be disabled on the OB-12.", SS_LEFT, id_status);
         SendMessageW(type_, CB_ADDSTRING, 0, (LPARAM)L"Programs");
         SendMessageW(type_, CB_ADDSTRING, 0, (LPARAM)L"Timbres");
@@ -274,30 +275,19 @@ private:
         fill();
     }
     void layout(int width, int height) {
-        width = std::max(width, 430);
-        height = std::max(height, 340);
-        HWND child = GetWindow(window_, GW_CHILD);
-        // Creation-order layout: title, type, bank, search, list, favorite, only, import, close, status.
-        if (!child) return;
-        MoveWindow(child, 20, 15, width - 40, 28, TRUE);
-        if (!(child = GetWindow(child, GW_HWNDNEXT))) return;
-        MoveWindow(child, 20, 52, 165, 260, TRUE);
-        if (!(child = GetWindow(child, GW_HWNDNEXT))) return;
-        MoveWindow(child, 195, 52, 135, 260, TRUE);
-        if (!(child = GetWindow(child, GW_HWNDNEXT))) return;
-        MoveWindow(child, 340, 52, width - 360, 27, TRUE);
-        if (!(child = GetWindow(child, GW_HWNDNEXT))) return;
-        MoveWindow(child, 20, 90, width - 40, height - 196, TRUE);
-        if (!(child = GetWindow(child, GW_HWNDNEXT))) return;
-        MoveWindow(child, 20, height - 92, 150, 30, TRUE);
-        if (!(child = GetWindow(child, GW_HWNDNEXT))) return;
-        MoveWindow(child, 180, height - 92, 155, 30, TRUE);
-        if (!(child = GetWindow(child, GW_HWNDNEXT))) return;
-        MoveWindow(child, width - 305, height - 92, 160, 30, TRUE);
-        if (!(child = GetWindow(child, GW_HWNDNEXT))) return;
-        MoveWindow(child, width - 135, height - 92, 115, 30, TRUE);
-        if (!(child = GetWindow(child, GW_HWNDNEXT))) return;
-        MoveWindow(child, 20, height - 51, width - 40, 40, TRUE);
+        width = std::max(width, 510);
+        height = std::max(height, 390);
+        // Never enumerate sibling HWNDs: creation/Z-order can differ across Windows hosts.
+        if (title_) MoveWindow(title_, 20, 14, width - 40, 27, TRUE);
+        if (type_) MoveWindow(type_, 20, 52, 165, 200, TRUE);
+        if (bank_) MoveWindow(bank_, 195, 52, 135, 200, TRUE);
+        if (search_) MoveWindow(search_, 340, 52, width - 360, 27, TRUE);
+        if (list_) MoveWindow(list_, 20, 90, width - 40, height - 196, TRUE);
+        if (favorite_) MoveWindow(favorite_, 20, height - 92, 150, 30, TRUE);
+        if (only_favorites_) MoveWindow(only_favorites_, 180, height - 92, 155, 30, TRUE);
+        if (import_) MoveWindow(import_, width - 305, height - 92, 160, 30, TRUE);
+        if (close_) MoveWindow(close_, width - 135, height - 92, 115, 30, TRUE);
+        if (status_) MoveWindow(status_, 20, height - 51, width - 40, 40, TRUE);
     }
     static LRESULT CALLBACK proc(HWND wnd, UINT msg, WPARAM w, LPARAM l) {
         if (msg == WM_NCCREATE) {
@@ -309,7 +299,14 @@ private:
         auto* self = reinterpret_cast<PresetBrowser*>(GetWindowLongPtrW(wnd, GWLP_USERDATA));
         if (!self) return DefWindowProcW(wnd, msg, w, l);
         switch (msg) {
-        case WM_CREATE: self->create_widgets(); SetTimer(wnd, 1, 500, nullptr); return 0;
+        case WM_CREATE: {
+            self->create_widgets();
+            RECT rc = {};
+            GetClientRect(wnd, &rc);
+            self->layout(rc.right - rc.left, rc.bottom - rc.top);
+            SetTimer(wnd, 1, 500, nullptr);
+            return 0;
+        }
         case WM_SIZE: self->layout(LOWORD(l), HIWORD(l)); return 0;
         case WM_GETMINMAXINFO: {
             MINMAXINFO* info = (MINMAXINFO*)l;
@@ -355,6 +352,7 @@ private:
             KillTimer(wnd, 1);
             self->window_ = nullptr;
             self->type_ = self->bank_ = self->search_ = self->list_ = self->status_ = nullptr;
+            self->title_ = self->favorite_ = self->only_favorites_ = self->import_ = self->close_ = nullptr;
             return 0;
         }
         return DefWindowProcW(wnd, msg, w, l);
