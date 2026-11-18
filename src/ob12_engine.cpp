@@ -547,6 +547,17 @@ bool Engine::restore_flash(const std::vector<uint8_t>& bytes) {
     return true;
 }
 
+bool Engine::reload(const std::string& rom_dir, const std::vector<uint8_t>& bytes) {
+    if (bytes.size() != 0x100000) return false;
+    // Caller first stops the feeder. An Engine reference held by the open panel remains
+    // valid, while the replacement machine is built with the saved firmware memory.
+    Engine fresh(rom_dir);
+    if (!fresh.restore_flash(bytes)) return false;
+    std::swap(impl, fresh.impl);
+    // fresh's destructor shuts down the old workers and disposes of the old machine.
+    return true;
+}
+
 bool Engine::snapshot_flash(std::vector<uint8_t>& bytes) {
     Impl& e = *impl;
     {

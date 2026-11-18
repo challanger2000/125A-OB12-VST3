@@ -114,6 +114,51 @@ struct Instrument {
     double position = 0, step = 1;  // resampling, frames of 48 kHz per host frame
     float last[2] = {}, next[2] = {};
 
+    void start_feeder(int preset) {
+    feeder = std::thread([this, preset]() {
+        bool preset_restored = false;
+        std::vector<int32_t> block(240 * 2);
+        while (!stop) {
+            uint32_t fill = written.load(std::memory_order_relaxed) - read.load(std::memory_order_acquire);
+            bool ready = engine->sounding_ready();
+            if (ready && !preset_restored && preset >= 0 && preset < 512) {
+                engine->select_preset(preset >= 256, (preset % 256) / 128, preset % 128);
+                preset_restored = true;
+            }
+            if (ready && fill >= (uint32_t)lead_frames) { Sleep(1); continue; }
+            engine->run(block.data(), 240);
+            if (!ready) continue;
+            uint32_t w = written.load(std::memory_order_relaxed);
+            const float gain = PanelView::output_gain();  // the user's final gain, after the analog stage
+            for (int i = 0; i < 240; i++, w++) {
+                ring[(w & (ring_size - 1)) * 2] = analog.run(0, block[i * 2] / 8388608.f) * gain;
+                ring[(w & (ring_size - 1)) * 2 + 1] = analog.run(1, block[i * 2 + 1] / 8388608.f) * gain;
+            }
+            written.store(w, std::memory_order_release);
+        }
+    });
+    }
+    bool reload_project(const std::vector<uint8_t>& saved, int preset) {
+        if (!engine || saved.size() != flash_image_bytes) return false;
+        stop.store(true, std::memory_order_release);
+        if (feeder.joinable()) feeder.join();
+        if (!engine->reload(rom_folder(), saved)) {
+            stop.store(false, std::memory_order_release);
+            start_feeder(-1);
+            return false;
+        }
+        std::fill(ring.begin(), ring.end(), 0.0f);
+        written.store(0, std::memory_order_relaxed);
+        read.store(0, std::memory_order_relaxed);
+        underruns.store(0, std::memory_order_relaxed);
+        position = 0;
+        step = 1;
+        last[0] = last[1] = next[0] = next[1] = 0;
+        analog = AnalogOut{};
+        stop.store(false, std::memory_order_release);
+        start_feeder(preset);
+        return true;
+    }
     bool start(const std::vector<uint8_t>* saved = nullptr, int preset = -1) {
         std::string rom = rom_folder();
         if (GetFileAttributesA((rom + "\\12cpu152-CPU-v1.52-FINAL.bin").c_str()) == INVALID_FILE_ATTRIBUTES) return false;
@@ -128,28 +173,7 @@ struct Instrument {
             CreateDirectoryA(folder.c_str(), nullptr);
             engine->set_flash_file(folder + "\\flash.bin");
         }
-        feeder = std::thread([this, preset]() {
-            bool preset_restored = false;
-            std::vector<int32_t> block(240 * 2);
-            while (!stop) {
-                uint32_t fill = written.load(std::memory_order_relaxed) - read.load(std::memory_order_acquire);
-                bool ready = engine->sounding_ready();
-                if (ready && !preset_restored && preset >= 0 && preset < 512) {
-                    engine->select_preset(preset >= 256, (preset % 256) / 128, preset % 128);
-                    preset_restored = true;
-                }
-                if (ready && fill >= (uint32_t)lead_frames) { Sleep(1); continue; }
-                engine->run(block.data(), 240);
-                if (!ready) continue;
-                uint32_t w = written.load(std::memory_order_relaxed);
-                const float gain = PanelView::output_gain();  // the user's final gain, after the analog stage
-                for (int i = 0; i < 240; i++, w++) {
-                    ring[(w & (ring_size - 1)) * 2] = analog.run(0, block[i * 2] / 8388608.f) * gain;
-                    ring[(w & (ring_size - 1)) * 2 + 1] = analog.run(1, block[i * 2 + 1] / 8388608.f) * gain;
-                }
-                written.store(w, std::memory_order_release);
-            }
-        });
+        start_feeder(preset);
         return true;
     }
     ~Instrument() {
@@ -406,15 +430,12 @@ public:
 
         if (header.selected_preset < -1 || header.selected_preset >= 512) return kResultFalse;
         std::lock_guard<std::mutex> hold(instrument_lock);
-        bool running = bool(instrument);
-        instrument.reset(); // stop the old feeder before changing its machine memory
         project_flash = std::move(image);
         project_preset = header.selected_preset;
-        if (running) {
-            std::unique_ptr<Instrument> fresh(new Instrument);
-            if (!fresh->start(&project_flash, project_preset)) return kResultFalse;
-            instrument = std::move(fresh);
-        }
+        // Keep the Instrument and Engine addresses stable: an open PanelView holds
+        // an Engine reference, so destroying the Instrument here would dangle it.
+        if (instrument && !instrument->reload_project(project_flash, project_preset))
+            return kResultFalse;
         return kResultOk;
     }
     tresult PLUGIN_API getState(IBStream* stream) override {
