@@ -137,7 +137,7 @@ static bool test_scale(IComponent* component, MemoryState* saved) {
     // Test the actual Win32 controls rather than a mocked list or a screenshot.
     bool browser_ok = false;
     SendMessageW(child, WM_COMMAND, MAKEWPARAM(1503, 0), 0);
-    HWND browser = FindWindowW(L"125A_OB12_PresetBrowser", nullptr);
+    HWND browser = FindWindowW(L"125A_OB12_PresetBrowser_v2", nullptr);
     if (browser) {
         HWND ty = GetDlgItem(browser, 3101);
         HWND bk = GetDlgItem(browser, 3102);
@@ -191,6 +191,62 @@ static bool test_scale(IComponent* component, MemoryState* saved) {
     DestroyWindow(parent);
     controller->release();
     return browser_ok && state_open_editor_ok;
+}
+
+// Regression for Studio One: remove an instrument, reinstantiate it,
+// unload/reload the DLL, then open the native browser again.  A host-owned
+// registered WNDPROC formerly remained after FreeLibrary, jumping to the old DLL.
+static bool test_second_plugin_instance(const char* dll_path) {
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        HMODULE dll = LoadLibraryA(dll_path);
+        if (!dll) { puts("INSTANCE_RELOAD_TEST=FAIL LoadLibrary"); return false; }
+        auto get = (IPluginFactory * (PLUGIN_API*)())GetProcAddress(dll, "GetPluginFactory");
+        if (!get) { FreeLibrary(dll); return false; }
+        IPluginFactory* factory = get();
+        PClassInfo info{};
+        bool ok = factory->getClassInfo(0, &info) == kResultOk;
+        IComponent* component = nullptr;
+        if (ok) ok = factory->createInstance(info.cid, IComponent::iid, (void**)&component) == kResultOk && component;
+        if (ok) ok = component->initialize(nullptr) == kResultOk;
+        IEditController* controller = nullptr;
+        IPlugView* view = nullptr;
+        HWND parent = nullptr;
+        if (ok) {
+            component->queryInterface(IEditController::iid, (void**)&controller);
+            ok = controller != nullptr;
+        }
+        if (ok) {
+            view = controller->createView(ViewType::kEditor);
+            ok = view != nullptr;
+        }
+        ViewRect wanted{};
+        if (ok) {
+            view->getSize(&wanted);
+            parent = CreateWindowW(L"STATIC", L"", WS_OVERLAPPEDWINDOW, 0, 0,
+                                   wanted.getWidth(), wanted.getHeight(),
+                                   nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+            ok = parent && view->attached(parent, kPlatformTypeHWND) == kResultOk;
+        }
+        if (ok) {
+            HWND panel = FindWindowExW(parent, nullptr, L"125A_OB12_PanelView_v2", nullptr);
+            if (!panel) ok = false;
+            else {
+                SendMessageW(panel, WM_COMMAND, MAKEWPARAM(1503,0), 0);
+                HWND browser = FindWindowW(L"125A_OB12_PresetBrowser_v2", nullptr);
+                ok = browser && GetDlgItem(browser, 3104) && GetDlgItem(browser, 3110);
+                if (browser) DestroyWindow(browser);
+            }
+        }
+        if (view) { view->removed(); view->release(); }
+        if (parent) DestroyWindow(parent);
+        if (controller) controller->release();
+        if (component) { component->terminate(); component->release(); }
+        FreeLibrary(dll);
+        printf("INSTANCE_RELOAD_CYCLE_%d=%s\n", cycle + 1, ok ? "PASS" : "FAIL");
+        if (!ok) return false;
+    }
+    puts("INSTANCE_RELOAD_TEST=PASS iterations=3 native_panel_and_browser_after_dll_unload");
+    return true;
 }
 
 int main(int, char** argv) {
@@ -321,5 +377,7 @@ int main(int, char** argv) {
     component->setActive(false);
     component->terminate();
     component->release();
-    return audio_ok && preselect_browser_ok && state_ok && browser_ok ? 0 : 2;
+    FreeLibrary(dll);
+    const bool reload_ok = test_second_plugin_instance(argv[1]);
+    return audio_ok && preselect_browser_ok && state_ok && browser_ok && reload_ok ? 0 : 2;
 }
