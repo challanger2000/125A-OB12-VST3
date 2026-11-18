@@ -128,7 +128,7 @@ jobs:
           if errorlevel 1 exit /b 1
           build\bank_import_smoke.exe build\OB12.vst3\Contents\x86_64-win\rom build\bank-tests\12tmbVA2.mid build\bank-tests\12prgVA2.mid build\OB12.vst3\Contents\x86_64-win\rom\presets\12tmbFS.bin build\OB12.vst3\Contents\x86_64-win\rom\presets\12prgFS.bin direct
           if errorlevel 1 exit /b 1
-      - name: Adversarial P007 source-contract: project-private factory reset must actually revert flash
+      - name: Adversarial P007 project-private factory reset must actually revert flash
         shell: cmd
         timeout-minutes: 5
         run: |
