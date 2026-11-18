@@ -468,8 +468,8 @@ private:
         first_transfer_writes_ = observed_transfer_writes_ = engine_.flash_writes();
         transfer_started_ = last_flash_activity_ = GetTickCount64();
         transferring_ = true;
-        if (!timbres.empty()) engine_.send_sysex(timbres.data(), (int)timbres.size());
-        if (!programs.empty()) engine_.send_sysex(programs.data(), (int)programs.size());
+        engine_.send_sysex_pair(timbres.data(), (int)timbres.size(),
+                                programs.data(), (int)programs.size());
         text_status(L"Transferring original-format Program/Timbre bank; preset selection locked.");
     }
     void create_widgets() {

@@ -216,6 +216,17 @@ struct Engine::Impl {
     void sysex_step() {  // every millisecond, after the inputs
         if (sysex_queue.empty() || k < sysex_next) return;
         const std::vector<u8>& message = sysex_queue.front();
+        if (message.empty()) {
+            // Deliberate inter-bank barrier. The first bank's end marker starts
+            // hardware flash erase/program + Master CPU reset. Without a pause,
+            // the Program header is delivered while firmware is still updating
+            // the Timbres; it is silently lost. Give the actual firmware 25 s of
+            // emulated time to finish the update and return to its normal mode.
+            sysex_next = k + 25L * 96000L;
+            sysex_queue.pop_front();
+            sysex_left.store((int)sysex_queue.size(), std::memory_order_relaxed);
+            return;
+        }
         m->midi_in(message);
         sysex_next = k + (long)(message.size() * 30.72) + sysex_gap;
         sysex_queue.pop_front();
@@ -577,6 +588,33 @@ void Engine::send_sysex(const uint8_t* bytes, int count, int gap_ms) {
     std::lock_guard<std::mutex> hold(impl->input_lock);
     impl->pending_sysex.insert(impl->pending_sysex.end(), messages.begin(), messages.end());
     impl->pending_gap = gap_ms;
+    impl->input_waiting = true;
+}
+
+void Engine::send_sysex_pair(const uint8_t* timbres, int timbre_count,
+                             const uint8_t* programs, int program_count, int gap_ms) {
+    auto split = [](const uint8_t* bytes, int count) {
+        std::vector<std::vector<u8>> messages;
+        if (!bytes || count <= 0) return messages;
+        for (int i = 0; i < count; ++i) {
+            if (bytes[i] != 0xf0) continue;
+            int end = i + 1;
+            while (end < count && bytes[end] != 0xf7) ++end;
+            if (end >= count) break;
+            messages.emplace_back(bytes + i, bytes + end + 1);
+            i = end;
+        }
+        return messages;
+    };
+    auto first = split(timbres, timbre_count);
+    auto second = split(programs, program_count);
+    if (first.empty() && second.empty()) return;
+    std::lock_guard<std::mutex> guard(impl->input_lock);
+    for (auto& message : first) impl->pending_sysex.push_back(std::move(message));
+    if (!first.empty() && !second.empty())
+        impl->pending_sysex.emplace_back(); // one private barrier marker
+    for (auto& message : second) impl->pending_sysex.push_back(std::move(message));
+    impl->pending_gap = std::clamp(gap_ms, 0, 1000);
     impl->input_waiting = true;
 }
 

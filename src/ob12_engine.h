@@ -33,6 +33,10 @@ public:
     // the next after the previous has gone out on the line and gap_ms has passed. The factory
     // files carry about 100 ms between messages; the firmware writes flash in those gaps.
     void send_sysex(const uint8_t* bytes, int count, int gap_ms = 100);
+    // Transfer matching Timbres/Programs as two *separate* hardware update sessions.
+    // The emulated CPU must finish flash programming and reboot between the sessions.
+    void send_sysex_pair(const uint8_t* timbres, int timbre_count,
+                         const uint8_t* programs, int program_count, int gap_ms = 100);
     int sysex_waiting() const;                           // messages not yet sent
     // The sysex of a .syx file, or of a Standard MIDI File's F0 events, as F0 ... F7 messages.
     static std::string read_sysex(const std::wstring& path, std::vector<uint8_t>& out);
