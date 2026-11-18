@@ -555,6 +555,98 @@ bool Engine::reload(const std::string& rom_dir, const std::vector<uint8_t>& byte
     return true;
 }
 
+std::string Engine::decode_bank(const std::vector<uint8_t>& input,
+                                std::vector<uint8_t>& image, uint32_t& flash_offset) {
+    image.clear();
+    flash_offset = 0;
+    auto parse_hex5 = [&](size_t offset, uint32_t& out) {
+        if (offset + 5 > input.size()) return false;
+        out = 0;
+        for (int n = 0; n < 5; ++n) {
+            const uint8_t c = input[offset + n];
+            int digit = c >= '0' && c <= '9' ? c - '0' :
+                        c >= 'A' && c <= 'F' ? c - 'A' + 10 :
+                        c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
+            if (digit < 0) return false;
+            out = (out << 4) | (uint32_t)digit;
+        }
+        return true;
+    };
+    bool have_data = false, ended = false;
+    uint32_t next = 0;
+    for (size_t at = 0; at < input.size();) {
+        if (input[at] != 0xf0) return "Expected OB-12 SysEx start";
+        size_t end = at + 1;
+        while (end < input.size() && input[end] != 0xf7) ++end;
+        if (end >= input.size() || end < at + 6) return "Truncated OB-12 SysEx";
+        if (input[at + 1] != 0x31 || input[at + 2] != 0x30 ||
+            input[at + 3] != 0x00) return "Not an original OB-12 bank update stream";
+        uint32_t checksum = 0;
+        for (size_t k = at + 1; k < end - 1; ++k) checksum += input[k];
+        if (((~checksum) & 0x7f) != input[end - 1])
+            return "Original OB-12 SysEx checksum mismatch";
+        const uint8_t cmd = input[at + 4];
+        if (cmd == 0x7f) {
+            if (end < at + 13) return "Truncated OB-12 bank record";
+            uint32_t address = 0;
+            if (!parse_hex5(at + 5, address)) return "Invalid OB-12 flash address";
+            const size_t count = input[at + 10];
+            if (count == 0 || count > 127) return "Invalid OB-12 bank record length";
+            if (!have_data) {
+                flash_offset = address;
+                next = address;
+                have_data = true;
+            }
+            if (address != next) return "Noncontiguous OB-12 flash bank record";
+            std::vector<uint8_t> decoded;
+            for (size_t at_data = at + 11; at_data < end - 1;) {
+                size_t available = end - 1 - at_data;
+                size_t n = std::min<size_t>(8, available);
+                if (n < 2) return "Broken OB-12 seven-bit payload group";
+                uint8_t upper = input[at_data + n - 1];
+                for (size_t j = 0; j + 1 < n; ++j)
+                    decoded.push_back((uint8_t)(input[at_data + j] |
+                         ((upper & (1u << j)) ? 0x80 : 0)));
+                at_data += n;
+            }
+            if (count > decoded.size() || image.size() + count > 65536)
+                return "Incomplete or oversized OB-12 bank data";
+            image.insert(image.end(), decoded.begin(), decoded.begin() + count);
+            next += (uint32_t)count;
+        } else if (cmd == 0x7e || cmd == 0x67 || cmd == 0x71 || cmd == 0x7a) {
+            uint32_t declared = 0;
+            if (!parse_hex5(at + 5, declared) || declared != image.size())
+                return "OB-12 bank-size trailer mismatch";
+            ended = true;
+        } else if (cmd != 0x68 && cmd != 0x6f && cmd != 0x70 && cmd != 0x7d) {
+            return "Unexpected command in OB-12 bank stream";
+        }
+        at = end + 1;
+    }
+    if (!have_data || !ended) return "Incomplete OB-12 bank update";
+    if (!((flash_offset == 0xC0000 && image.size() == 42752) ||
+          (flash_offset == 0xD0000 && image.size() == 40448)))
+        return "Only complete original 256-Timbre/Program banks are supported";
+    return {};
+}
+
+bool Engine::apply_bank_pair(const std::vector<uint8_t>& programs,
+                             const std::vector<uint8_t>& timbres) {
+    if (programs.size() != 40448 || timbres.size() != 42752) return false;
+    Impl& e = *impl;
+    // Prevent interference with the original firmware's own UART update mode.
+    if (e.sysex_left.load(std::memory_order_relaxed) != 0) return false;
+    std::lock_guard<std::mutex> running(e.run_lock);
+    if (e.m->flash.size() != 0x100000) return false;
+    std::copy(timbres.begin(), timbres.end(), e.m->flash.begin() + 0xC0000);
+    std::copy(programs.begin(), programs.end(), e.m->flash.begin() + 0xD0000);
+    e.flash_dirty = true;
+    e.flash_changed_at = e.k;
+    // The original Master CPU and DSP emulation are unchanged. A subsequent
+    // MIDI preset selection reloads Program/Timbre parameters from flash.
+    return true;
+}
+
 bool Engine::snapshot_flash(std::vector<uint8_t>& bytes) {
     Impl& e = *impl;
     // The asynchronous feeder can sleep forever while its output ring is full

@@ -27,6 +27,12 @@ public:
     void detach_flash_file();  // preserve initial memory, then isolate all future writes per plugin
     bool snapshot_flash(std::vector<uint8_t>& bytes);     // consistent 1-MiB image, copied by engine thread
     bool restore_flash(const std::vector<uint8_t>& bytes); // call before engine audio starts
+    // Safe modern bank loading: validate original Viscount update streams, then
+    // stage verified 256-preset binary images in this instance's private flash.
+    static std::string decode_bank(const std::vector<uint8_t>& sysex,
+                                   std::vector<uint8_t>& image, uint32_t& flash_offset);
+    bool apply_bank_pair(const std::vector<uint8_t>& programs,
+                         const std::vector<uint8_t>& timbres);
     bool reload(const std::string& rom_dir, const std::vector<uint8_t>& bytes); // keep Engine address stable
     long flash_writes() const;                           // erases and words programmed so far
 
