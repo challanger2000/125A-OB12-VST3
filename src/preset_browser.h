@@ -74,6 +74,8 @@ private:
     HBRUSH background_ = nullptr, field_brush_ = nullptr;
     HFONT font_ = nullptr;
     std::array<std::array<std::string, 256>, 2> names_{};
+    std::array<std::array<std::string, 256>, 2> preview_names_{};
+    bool preview_active_ = false;
     std::set<int> favorites_;
     int selected_slot_ = -1;
     int selected_key_ = -1;
@@ -122,7 +124,8 @@ private:
     // The stock image contains 256 fixed-size slots. The position of the ASCII name
     // is NOT assumed: find a common offset with readable, distinctive names.
     // Fail closed (display slot numbers) if the image does not meet confidence checks.
-    bool scan_names(int type, const std::vector<unsigned char>& bytes) {
+    bool scan_names(int type, const std::vector<unsigned char>& bytes,
+                    std::array<std::string, 256>* destination = nullptr) {
         if (type < 0 || type > 1 || bytes.empty() || bytes.size() % 256 != 0)
             return false;
         size_t stride = bytes.size() / 256;
@@ -138,7 +141,7 @@ private:
                 if (!actual[i].empty()) { ++good; unique.insert(actual[i]); }
             }
             if (good >= 160 && unique.size() >= 64) {
-                names_[type] = std::move(actual);
+                (destination ? *destination : names_[type]) = std::move(actual);
                 return true;
             }
         }
@@ -163,7 +166,7 @@ private:
             }
         }
         if (best_score < 0) return false;
-        names_[type] = std::move(best);
+        (destination ? *destination : names_[type]) = std::move(best);
         return true;
     }
     void load_names(int type, const std::string& path) {
@@ -284,7 +287,7 @@ private:
         for (int slot = 0; slot < 128; ++slot) {
             int key = slot_key(slot);
             if (only && !favorites_.count(key)) continue;
-            const std::string& name = names_[ty][bank * 128 + slot];
+            const std::string& name = (preview_active_ ? preview_names_ : names_)[ty][bank * 128 + slot];
             wchar_t number[24] = {};
             swprintf(number, 24, L"%lc-%03d", bank ? L'B' : L'A', slot + 1);
             std::wstring label = std::wstring(favorites_.count(key) ? L"\u2605  " : L"    ") +
@@ -300,6 +303,10 @@ private:
         InvalidateRect(list_, nullptr, TRUE);
     }
     void select_current() {
+        if (preview_active_) {
+            text_status(L"This soundbank is only being previewed. Use Load Bank Pair to activate it.");
+            return;
+        }
         if (transferring_) {
             text_status(L"Soundbank transfer in progress. Preset selection is temporarily disabled.");
             return;
@@ -365,6 +372,35 @@ private:
                 SendMessageW(library_, CB_ADDSTRING, 0, (LPARAM)entry.title.c_str());
             SendMessageW(library_, CB_SETCURSEL, 0, 0);
         }
+    }
+    void preview_bank() {
+        const int index = library_ ? (int)SendMessageW(library_, CB_GETCURSEL, 0, 0) - 1 : -1;
+        preview_active_ = index >= 0 && index < (int)bank_pairs_.size();
+        preview_names_[0].fill({});
+        preview_names_[1].fill({});
+        if (!preview_active_) {
+            if (title_) SetWindowTextW(title_, L"125A  /  OB-12 PRESET BROWSER  |  ACTIVE MEMORY");
+            if (list_) EnableWindow(list_, !transferring_);
+            fill();
+            return;
+        }
+        const BankPair& bank = bank_pairs_[index];
+        std::vector<uint8_t> bytes;
+        std::vector<unsigned char> image;
+        int count = 0;
+        for (int type = 0; type < 2; ++type) {
+            const std::wstring& path = type == 0 ? bank.program_path : bank.timbre_path;
+            bytes.clear();
+            image.clear();
+            if (Engine::read_sysex(path, bytes).empty() && decode_bank(bytes, image) &&
+                scan_names(type, image, &preview_names_[type])) ++count;
+        }
+        if (title_) SetWindowTextW(title_, L"125A  /  OB-12 PRESET BROWSER  |  LIBRARY PREVIEW (NOT LOADED)");
+        if (list_) EnableWindow(list_, FALSE); // preview entries must not recall a different bank
+        fill();
+        text_status(count == 2
+            ? L"Preview only. Both Program and Timbre names identified. Load Bank Pair to activate."
+            : L"Preview only. Some names are unavailable; load the pair to use its sounds.");
     }
     void import_bank() {
         if (transferring_ || engine_.sysex_waiting() > 0) {
@@ -508,7 +544,7 @@ private:
         }
         case WM_COMMAND:
             if (LOWORD(w) == id_library && HIWORD(w) == CBN_SELCHANGE) {
-                self->text_status(L"Soundbank selected. Press 'Load Bank Pair' to transfer it to the original OB-12 memory.");
+                self->preview_bank();
                 return 0;
             }
             if (LOWORD(w) == id_type || LOWORD(w) == id_bank) {
@@ -534,6 +570,10 @@ private:
                 if (waiting == 0 && now - self->transfer_started_ > 1500 &&
                     now - self->last_flash_activity_ >= 2000) {
                     self->transferring_ = false;
+                    self->preview_active_ = false;
+                    if (self->library_) SendMessageW(self->library_, CB_SETCURSEL, 0, 0);
+                    if (self->title_) SetWindowTextW(self->title_, L"125A  /  OB-12 PRESET BROWSER  |  ACTIVE MEMORY");
+                    if (self->list_) EnableWindow(self->list_, TRUE);
                     self->last_index_writes_ = -1;
                     self->sync_live_names();
                     self->text_status(writes > self->first_transfer_writes_
@@ -544,7 +584,7 @@ private:
                     swprintf(text, 128, L"Transferring SysEx: %d messages pending. Do not change presets.", waiting);
                     self->text_status(text);
                 }
-            } else if (waiting == 0) self->sync_live_names();
+            } else if (waiting == 0 && !self->preview_active_) self->sync_live_names();
             return 0;
         }
         case WM_CTLCOLORSTATIC:
@@ -563,6 +603,7 @@ private:
         case WM_DESTROY:
             KillTimer(wnd, 1);
             self->window_ = nullptr;
+            self->preview_active_ = false;
             self->type_ = self->bank_ = self->search_ = self->list_ = self->status_ = nullptr;
             self->title_ = self->favorite_ = self->only_favorites_ = self->import_ = self->close_ = self->library_ = nullptr;
             return 0;
