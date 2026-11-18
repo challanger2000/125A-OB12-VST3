@@ -77,6 +77,8 @@ private:
     std::set<int> favorites_;
     int selected_slot_ = -1;
     int selected_key_ = -1;
+    bool names_live_ = false, observed_ready_ = false;
+    long last_index_writes_ = -1;
 
     static std::wstring wide(const std::string& text) {
         if (text.empty()) return {};
@@ -167,6 +169,38 @@ private:
         const std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(file)), {});
         scan_names(type, bytes);
     }
+    void sync_live_names() {
+        // Read actual original-emulator flash, not a stale factory .bin when a
+        // DAW project has restored a private bank or a user edited patches.
+        const bool ready = engine_.sounding_ready();
+        if (!ready) { observed_ready_ = false; return; }
+        if (!observed_ready_) { last_index_writes_ = -1; observed_ready_ = true; }
+        const long before = engine_.flash_writes();
+        if (names_live_ && before == last_index_writes_) return;
+        // Capture on the engine thread at a millisecond boundary; do not access its
+        // mutable flash vector directly from the Win32 editor/UI thread.
+        std::vector<uint8_t> flash;
+        if (!engine_.snapshot_flash(flash) || flash.size() != 0x100000 ||
+            engine_.flash_writes() != before) return;
+        std::array<std::string, 256> old_p = std::move(names_[0]);
+        std::array<std::string, 256> old_t = std::move(names_[1]);
+        names_[0].fill({});
+        names_[1].fill({});
+        const std::vector<unsigned char> programs(flash.begin() + 0xD0000,
+                                                   flash.begin() + 0xD0000 + 40448);
+        const std::vector<unsigned char> timbres(flash.begin() + 0xC0000,
+                                                  flash.begin() + 0xC0000 + 42752);
+        const bool p = scan_names(0, programs);
+        const bool t = scan_names(1, timbres);
+        // Unknown/invalid changed flash is shown using slot IDs, never the
+        // names of a different Factory bank.
+        (void)old_p;
+        (void)old_t;
+        names_live_ = p || t;
+        last_index_writes_ = before;
+        fill();
+    }
+
     // Decode the standard 7+1 byte packaging in Viscount's OB-12 update
     // records. Works on an Engine::read_sysex stream (F0...F7 messages).
     // This is for *catalogue titles only*. The firmware remains responsible
@@ -484,6 +518,7 @@ private:
             break;
         case WM_TIMER: {
             int waiting = self->engine_.sysex_waiting();
+            if (waiting == 0) self->sync_live_names();
             if (waiting) {
                 wchar_t text[100];
                 swprintf(text, 100, L"SysEx import: %d messages pending", waiting);
