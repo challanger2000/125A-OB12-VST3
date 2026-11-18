@@ -47,8 +47,10 @@ public:
     int sysex_waiting() const;                           // messages not yet sent
     // The sysex of a .syx file, or of a Standard MIDI File's F0 events, as F0 ... F7 messages.
     static std::string read_sysex(const std::wstring& path, std::vector<uint8_t>& out);
-    // Back to the factory memory: the stored flash is deleted and no longer written this session.
-    void forget_flash();
+    // Immediately restore THIS instance's pristine ROM factory flash; reject while a
+    // hardware SysEx update is queued. Preset selection subsequently reloads sound data.
+    // Does not delete the legacy global flash file or mutate another VST3 instance.
+    bool forget_flash();
     // MIDI OUT's system exclusive since the last take, as F0 ... F7 messages: a bulk dump from
     // SYSTEM, BULK DUMP lands here. With take, the bytes move into it and the store empties.
     size_t sysex_sent(std::vector<uint8_t>* take = nullptr);

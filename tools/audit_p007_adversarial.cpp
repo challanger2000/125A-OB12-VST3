@@ -41,9 +41,10 @@ int main(int argc, char** argv) {
     // This is exactly what PanelView::reset_memory invokes after the user
     // presses OK. Run the original CPU input loop for >1 ms so the queued
     // flag is definitely processed before snapshotting.
-    e.forget_flash();
-    std::vector<int32_t> audio(240*2);
-    e.run(audio.data(), 240);
+    if (!e.forget_flash()) {
+        std::puts("AUDIT_RESET_REQUEST=FAIL even though no update was active");
+        return 6;
+    }
     std::vector<uint8_t> reset;
     if (!e.snapshot_flash(reset)) return 6;
     const bool restored = reset == baseline;
@@ -71,5 +72,17 @@ int main(int argc, char** argv) {
         return 10;
     }
     std::puts("AUDIT_CONTRACT_RESET_MEMORY=PASS");
-    return 0;
+    // Negative/failure control: while a firmware update is queued the factory
+    // reset must be rejected and the exact 1-MiB project image left unchanged.
+    const uint8_t pending_sysex[] = {0xf0,0x31,0x30,0x00,0x68,0x36,0xf7};
+    e.send_sysex(pending_sysex, (int)sizeof pending_sysex);
+    const bool rejected = !e.forget_flash();
+    std::vector<uint8_t> after_reject;
+    const bool intact = e.snapshot_flash(after_reject) &&
+                        after_reject == baseline;
+    std::printf("AUDIT_RESET_WHILE_TRANSFER=%s request_rejected=%d "
+                "flash_unchanged=%d\n",
+                rejected && intact ? "PASS" : "FAIL",
+                (int)rejected,(int)intact);
+    return rejected && intact ? 0 : 11;
 }

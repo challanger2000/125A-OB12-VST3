@@ -37,6 +37,22 @@ public:
         if (background_) DeleteObject(background_);
     }
     void close() { if (window_ && IsWindow(window_)) DestroyWindow(window_); }
+    void on_factory_reset() {
+        // Previously browsed libraries and the 'current project' cache may
+        // contain the pre-reset user flash; do not allow it to undo Reset.
+        original_programs_.clear();
+        original_timbres_.clear();
+        active_library_index_ = 0;
+        selected_slot_ = -1;
+        selected_key_ = -1;
+        preview_active_ = false;
+        last_index_writes_ = -1;
+        if (library_) SendMessageW(library_, LB_SETCURSEL, 0, 0);
+        sync_live_names();
+        if (title_) SetWindowTextW(title_,
+            L"125A  /  OB-12 PRESET BROWSER  |  FACTORY MEMORY");
+        text_status(L"Factory memory restored in this project. Choose a sound to load it.");
+    }
     void show(HWND panel) {
         if (window_ && IsWindow(window_)) {
             ShowWindow(window_, SW_RESTORE);

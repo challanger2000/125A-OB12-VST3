@@ -666,10 +666,21 @@ struct PanelView::Impl {
         f.write((const char*)data.data(), data.size());
     }
     void reset_memory() {
-        if (MessageBoxW(window, L"Delete the stored memory (user programs, timbres, settings)?\n"
-                                L"The factory memory comes back the next time the plug-in loads.",
-                        L"OB-12", MB_OKCANCEL | MB_ICONWARNING) == IDOK)
-            engine.forget_flash();
+        if (MessageBoxW(window,
+                L"Restore this OB-12 plug-in instance's Program and Timbre memory "
+                L"to the original factory banks?\n"
+                L"The DAW project's next save will contain the restored memory. "
+                L"Existing legacy global files and other instances are not modified.\n"
+                L"The currently sounding patch may need to be selected again.",
+                L"OB-12 factory reset", MB_OKCANCEL | MB_ICONWARNING) != IDOK) return;
+        if (!engine.forget_flash()) {
+            MessageBoxW(window,
+                L"Factory reset was not applied. An original SysEx update may still "
+                L"be in progress; finish that transfer first.",
+                L"OB-12 factory reset", MB_OK | MB_ICONERROR);
+            return;
+        }
+        if (browser) browser->on_factory_reset();
     }
 
     // The LCD as a dot matrix, like the EII panel: every pixel a dot of the same size with a gap,

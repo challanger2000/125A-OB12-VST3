@@ -174,7 +174,6 @@ struct Engine::Impl {
     std::atomic<int> selected_program{-1};
     std::vector<std::vector<u8>> pending_sysex;
     int pending_gap = 100;
-    bool forget = false;
     struct KeyEvent { int bar, bit; bool down; };
     std::vector<KeyEvent> key_events;
     struct PotEvent { int channel, mux, value; };
@@ -235,7 +234,8 @@ struct Engine::Impl {
 
     // The unit's memory: see set_flash_file in ob12_engine.h.
     std::string flash_path;
-    std::vector<u8> factory;
+    std::vector<u8> factory; // pristine original ROM image, never overwritten by a DAW project
+    long manual_flash_changes = 0; // bank installations and factory restore are not firmware writes
     long flash_seen = 0, flash_changed_at = 0;
     bool flash_dirty = false;
     std::atomic<long> flash_count{0};
@@ -282,7 +282,7 @@ struct Engine::Impl {
     }
     void watch_flash() {  // every millisecond, on the engine's thread
         long now = m->flash_erases + m->flash_programs;
-        flash_count.store(now, std::memory_order_relaxed);
+        flash_count.store(now + manual_flash_changes, std::memory_order_release);
         if (now != flash_seen) { flash_seen = now; flash_changed_at = k; flash_dirty = true; }
         else if (flash_dirty && k - flash_changed_at > 96000) {
             if (!flash_path.empty()) save_flash();
@@ -295,12 +295,6 @@ struct Engine::Impl {
         if (!input_waiting.exchange(false)) return;
         std::lock_guard<std::mutex> hold(input_lock);
         if (!midi_bytes.empty()) { m->midi_in(midi_bytes); midi_bytes.clear(); }
-        if (forget) {
-            forget = false;
-            if (!flash_path.empty()) DeleteFileA(flash_path.c_str());
-            flash_path.clear();
-            flash_dirty = false;
-        }
         if (!pending_sysex.empty()) {
             for (auto& message : pending_sysex) sysex_queue.push_back(std::move(message));
             pending_sysex.clear();
@@ -454,6 +448,7 @@ Engine::Engine(const std::string& rom_dir) : impl(new Impl) {
     e.m = new master::Master();
     e.s = new slave::Slave();
     e.m->load(rom_dir);
+    e.factory = e.m->flash; // capture pristine firmware and 256+256 factory patches ONCE
     e.s->load(rom_dir);
     e.m->attach(e.m);
     e.s->attach(e.s);
@@ -528,7 +523,6 @@ Engine::Engine(const std::string& rom_dir) : impl(new Impl) {
 void Engine::set_flash_file(const std::string& path) {
     Impl& e = *impl;
     e.flash_path = path;
-    e.factory = e.m->flash;
     e.load_flash();
     e.flash_seen = e.m->flash_erases + e.m->flash_programs;
 }
@@ -539,7 +533,7 @@ bool Engine::restore_flash(const std::vector<uint8_t>& bytes) {
     e.m->flash = bytes;
     // The host project owns this image. Never leak it to the per-user shared flash file.
     e.flash_path.clear();
-    e.factory = e.m->flash;
+    // A restored user image must never replace the immutable factory-reset baseline.
     e.flash_seen = e.m->flash_erases + e.m->flash_programs;
     return true;
 }
@@ -672,6 +666,9 @@ bool Engine::apply_bank_pair(const std::vector<uint8_t>& programs,
     std::copy(programs.begin(), programs.end(), e.m->flash.begin() + 0xD0000);
     e.flash_dirty = true;
     e.flash_changed_at = e.k;
+    ++e.manual_flash_changes;
+    e.flash_count.store(e.m->flash_erases + e.m->flash_programs +
+                        e.manual_flash_changes, std::memory_order_release);
     // The original Master CPU and DSP emulation are unchanged. A subsequent
     // MIDI preset selection reloads Program/Timbre parameters from flash.
     return true;
@@ -740,10 +737,27 @@ void Engine::send_sysex_pair(const uint8_t* timbres, int timbre_count,
     impl->input_waiting = true;
 }
 
-void Engine::forget_flash() {
-    std::lock_guard<std::mutex> hold(impl->input_lock);
-    impl->forget = true;
-    impl->input_waiting = true;
+bool Engine::forget_flash() {
+    Impl& e = *impl;
+    // Factory reset is an immediate project-memory transaction even if the DAW is
+    // stopped and the feeder ring is full. Never wait for a future CPU tick.
+    // Engine::run holds run_lock before taking input_lock; use the same order.
+    std::lock_guard<std::mutex> running(e.run_lock);
+    std::lock_guard<std::mutex> incoming(e.input_lock);
+    if (e.factory.size() != e.m->flash.size() || !e.pending_sysex.empty() ||
+        !e.sysex_queue.empty() ||
+        e.sysex_left.load(std::memory_order_acquire) != 0)
+        return false; // do not overwrite a firmware update mid-transfer
+    // Preserve the original CPU/DSP state; the next preset selection will read
+    // the genuine factory parameters. This does not rewrite legacy global files.
+    e.m->flash = e.factory;
+    e.flash_path.clear();
+    e.flash_dirty = false;
+    e.flash_seen = e.m->flash_erases + e.m->flash_programs;
+    ++e.manual_flash_changes;
+    e.flash_count.store(e.flash_seen + e.manual_flash_changes,
+                        std::memory_order_release);
+    return true;
 }
 
 std::string Engine::read_sysex(const std::wstring& path, std::vector<uint8_t>& out) {
