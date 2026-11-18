@@ -572,8 +572,9 @@ std::string Engine::decode_bank(const std::vector<uint8_t>& input,
         }
         return true;
     };
-    bool have_data = false, ended = false;
-    uint32_t next = 0;
+    bool have_data = false, ended = false, have_declared_size = false;
+    uint32_t next = 0, declared_size = 0;
+    uint8_t section_marker = 0;
     for (size_t at = 0; at < input.size();) {
         if (input[at] != 0xf0) return "Expected OB-12 SysEx start";
         size_t end = at + 1;
@@ -586,6 +587,7 @@ std::string Engine::decode_bank(const std::vector<uint8_t>& input,
         if (((~checksum) & 0x7f) != input[end - 1])
             return "Original OB-12 SysEx checksum mismatch";
         const uint8_t cmd = input[at + 4];
+        if (ended) return "Extra OB-12 data after bank end marker";
         if (cmd == 0x7f) {
             if (end < at + 13) return "Truncated OB-12 bank record";
             uint32_t address = 0;
@@ -616,9 +618,23 @@ std::string Engine::decode_bank(const std::vector<uint8_t>& input,
         } else if (cmd == 0x7b || cmd == 0x7c || cmd == 0x7e ||
                    cmd == 0x67 || cmd == 0x71 || cmd == 0x7a ||
                    cmd == 0x6d || cmd == 0x6e) {
+            // Authentic Viscount files put the 7B/7C size record *before*
+            // the first 7F payload. Some community bank exports put the
+            // same marker after all records. Both encodings are genuine.
             uint32_t declared = 0;
-            if (!parse_hex5(at + 5, declared) || declared != image.size())
+            if (!parse_hex5(at + 5, declared))
+                return "Malformed OB-12 bank-size declaration";
+            if (have_declared_size && (section_marker != cmd || declared_size != declared))
+                return "Conflicting OB-12 bank-size records";
+            if (have_data && declared != image.size())
                 return "OB-12 bank-size trailer mismatch";
+            have_declared_size = true;
+            declared_size = declared;
+            section_marker = cmd;
+        } else if (cmd == 0x7d) {
+            // The actual 7D end-of-update command, not the earlier size
+            // declaration, terminates the real SysEx bank.
+            if (!have_data) return "OB-12 bank end before any records";
             ended = true;
         } else if (cmd == 0x04 && !have_data) {
             // The original VA2 MIDI bank has a short Viscount setup command
@@ -626,7 +642,7 @@ std::string Engine::decode_bank(const std::vector<uint8_t>& input,
             if (end - at != 9 || input[at + 5] != 0 ||
                 input[at + 6] != 0x44 || input[at + 7] != 1)
                 return "Unsupported OB-12 bank setup record";
-        } else if (cmd != 0x68 && cmd != 0x6f && cmd != 0x70 && cmd != 0x7d) {
+        } else if (cmd != 0x68 && cmd != 0x6f && cmd != 0x70) {
             return "Unexpected command in OB-12 bank stream";
         }
         at = end + 1;
@@ -635,6 +651,12 @@ std::string Engine::decode_bank(const std::vector<uint8_t>& input,
     if (!((flash_offset == 0xC0000 && image.size() == 42752) ||
           (flash_offset == 0xD0000 && image.size() == 40448)))
         return "Only complete original 256-Timbre/Program banks are supported";
+    if (have_declared_size && declared_size != image.size())
+        return "OB-12 declared size differs from decoded data";
+    if (section_marker == 0x7b && flash_offset != 0xD0000)
+        return "OB-12 Program section at unexpected address";
+    if (section_marker == 0x7c && flash_offset != 0xC0000)
+        return "OB-12 Timbre section at unexpected address";
     return {};
 }
 
