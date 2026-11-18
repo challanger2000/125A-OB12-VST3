@@ -57,3 +57,37 @@ The repository at the feature baseline contains **94 tracked files**, of which *
 | Owner listening and approval | **NOT RUN** |
 
 **Verdict:** DO NOT call this a FULL AUDIT, GUI PASS, QA PASS or RELEASE READY. The source and tests already contain material gaps. Keep main/feature release unchanged until fixes and required independent end-to-end evidence are verified.
+
+## Audit continuation: parser hardening and test-gate status (2026-11-18)
+
+**Pinned P007 baseline remains `04d16b5594782593d9972799fe122c165a6a40d7`.**
+The work in `audit/p007-adversarial-20261118` is investigatory, not shipped.
+Its exact audit head after the follow-up source changes is `c62afa4aaf29304773020a44936f2fee3b2d7da3` (the report commit itself follows this SHA).
+
+### Corrected source paths — NOT YET RUNTIME VERIFIED
+
+| Finding | Applied audit-branch change | Executed evidence and remaining proof |
+|---|---|---|
+| F01 reset | `Engine::forget_flash()` now attempts a synchronous, private 1-MiB restore from immutable constructor factory image. Win32 reset dialog reports rejection; browser invalidates pre-reset user-memory cache. | **Previous P007 reproducible FAIL** in run 44381951577. Updated code **NOT RUN** at exact new SHA. A native test with transfer-rejection control was committed, but no passing Windows run for that revision is available. |
+| F02 bank switch after state recall | `apply_bank_pair` stages bank payloads through original CPU boot, snapshots include selected preboot bank, and a handoff re-applies when the Slave becomes ready; check and lock pending SysEx transaction. | **Previously reproduced FAIL** in run 44383971248, which stopped the old suite. New boot-survival and negative pending-transfer tests committed; new SHA runtime **NOT RUN**. |
+| F04 untrusted legacy flash file | `Impl::load_flash` validates offsets/lengths with subtraction (avoids uint32 overflow), rejects partial, zero-sized, duplicate and overlapping sections and commits only a complete temporary 1-MiB image. | Native integration now covers 1 valid + 4 malicious/truncated/overlapping fixture cases; **NOT RUN** after code edits. |
+| F04 corrupt binary panel art | `PanelView::Impl::load` has a 32-MiB file cap, bounded run/command/point reads, valid finite geometry dimensions, semantic opcodes and a balanced clip-stack requirement. Only a fully parsed valid art commits. | The **real original P007 panel asset** was independently parsed offline: 1,753,960 bytes, 25,347 runs, 472×126 art units, 188 balanced clip pushes/pops. **Eight altered in-memory fixtures** were rejected by an independently authored reference parser for the intended reasons (length, count, NaN, command overrun, illegal mode, truncated point, orphan closing clip and trailing data). This proves **fixture validity only**; native C++ `PanelView::load` negative integration remains **NOT RUN**. |
+| F04 malformed firmware ROM | Original Master and Slave external firmware copies now reject oversized files instead of copying past their emulated flash vectors. | Original shipped ROM sizes offline: Master 343,444 bytes, Slave 149,744 bytes, both inside emulated ranges. Malformed-file native controls **NOT RUN**. |
+
+### Source/test scope and independent findings
+
+The 251-item matrix remains an inventory rather than a claim of functional control-by-control testing. The original P007 Windows host harness checks direct synthetic bank switching, the panel container and a few preset names, but it does **not** exercise each of the 53 pots, 85 hardware push buttons or 96 LED routes. CPU/DSP algorithmic parity with the physical OB-12 was not established. User's prior actual Studio One black-edge and lifecycle regressions cannot be closed by a synthetic fake-frame test.
+
+The VST3 audio callback still uses dynamic `std::vector`, blocking `std::mutex` in `midi_log()` and `Engine::midi()`, sample offsets are sorted but not dispatched at their block offsets, and an offline render loop can wait unboundedly on the feeder. These are material source-identified realtime/MIDI/liveness concerns. No source change to these is marked PASS and no deadline/PDC measurement has been run.
+
+### Executed evidence and CI availability
+
+- Baseline Windows P007 CI: [44376294031](https://github.com/challanger2000/125A-OB12-VST3/actions/runs/44376294031), success on the **unmodified** feature SHA.
+- Independent negative reset control: [44381951577](https://github.com/challanger2000/125A-OB12-VST3/actions/runs/44381951577), intended red with actual wrong byte 39 versus expected 46, positive reload control PASS.
+- Intermediate remediation: [44383971248](https://github.com/challanger2000/125A-OB12-VST3/actions/runs/44383971248), failed after project recall with `LIBRARY_SWITCH_TEST=FAIL flash_changed=0`.
+- Local/offline real asset verification: 12/12 valid Program/Timbre MIDI files plus 4/4 corrupted-MIDI negatives, one original panel asset plus **8/8** corrupted-panel negatives. Both were independent reference parsers, **not the compiled project C++**.
+- Latest source edits have **no matching successful Windows workflow run**. They cannot be evaluated by reusing or rerunning an older commit's green logs. The workflow remains configured for manual `workflow_dispatch`, but a dispatch capability is not available in the current GitHub connector. All native post-fix tests are **NOT RUN**, not FAIL and not PASS.
+
+### Latest verdict
+
+**PARTIAL ADVERSARIAL AUDIT / NO-GO for release.** Source inventory and static review advanced; the original known P007 and an intermediate remediation failed distinct executed tests. New defensive source modifications and new tests are **unverified at the same commit**. The required complete per-control interactive audit, official Steinberg Validator, 125A Tester, realtime p95/p99/max, Studio One project/black-band replay, parallel VST3 instances, physical hardware PCM and second independent source review remain NOT RUN. No P007 bundle or stable branch was overwritten.
