@@ -189,7 +189,7 @@ static bool test_scale(IComponent* component, MemoryState* saved) {
         for (int row = 1; library && row < collections; ++row) {
             wchar_t name[512] = {};
             SendMessageW(library, LB_GETTEXT, row, (LPARAM)name);
-            if (wcsncmp(name, L"UI ", 3) == 0) { alternate = row; break; }
+            if (wcscmp(name, L"UI") == 0 || wcsncmp(name, L"UI ", 3) == 0) { alternate = row; break; }
         }
         if (alternate >= 1 && list) {
             SendMessageW(library, LB_SETCURSEL, alternate, 0);
