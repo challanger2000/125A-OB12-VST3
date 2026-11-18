@@ -34,9 +34,9 @@ does not provide instantaneous cross-bank audition. Projects should be backed up
 
 ## Remaining issues / blockers
 
-1. **Source compile:** Windows 2022 CI compiles the changed files against VST3 SDK 3.7.12.
-   A successful compile is only syntax/ABI verification, not a functional audio pass.
-2. **No redistributable built plugin** is provided in this branch; firmware is copyright
+1. **Source compile and link:** Windows 2022 CI compiles the modified files against VST3 SDK 3.7.12 and links a real Windows VST3 DLL without ROM assets (GitHub Actions run 44323882494: PASS).
+   Successful compilation and linkage do not establish functional audio performance.
+2. **No firmware-backed release plugin** is provided in this branch; firmware is copyright
    Viscount and is not stored in Git. Supply it locally before running \`tools/build_125A.bat\`.
 3. **DAW tests outstanding:** Steinberg validator, Studio One 8.1.2 note playback,
    multiple instances, editor open while restoring state, current preset recall,
