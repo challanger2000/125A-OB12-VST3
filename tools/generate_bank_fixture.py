@@ -42,14 +42,14 @@ def midi_bank(image: bytes, base: int, label: str) -> bytes:
     assert (base, len(image)) in ((0xD0000, 40448), (0xC0000, 42752))
     events = [syx(0x68), syx(0x68),
               syx(0x6F, f". Updating Sect.[{label}] .".encode("ascii")),
-              syx(0x70, b"> From dump OB 12 <"),
-              syx(0x7E, f"{len(image):05X}".encode("ascii"))]
+              syx(0x70, b"> From dump OB 12 <")]
     cursor = base
     for start in range(0, len(image), 42):
         chunk = image[start:start+42]
         events.append(syx(0x7F, f"{cursor:05X}".encode("ascii") +
                           bytes((len(chunk),)) + pack_7_1(chunk)))
         cursor += len(chunk)
+    events.append(syx(0x7E, f"{len(image):05X}".encode("ascii")))  # section end
     events.append(syx(0x7D))
     # Standard MIDI format 0. Send 10ms between records in the synthetic test
     # to reduce CI runtime. The hardware-compatible loader itself still sends
