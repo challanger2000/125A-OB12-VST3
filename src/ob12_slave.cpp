@@ -38,6 +38,10 @@ public:
     }
     void load(const std::string& rom) {
         auto image = read_file(rom + "/12dsp111-DSP-v1.11-FINAL.bin");
+        // The Slave has a 256-KiB ROM address space; no external ROM may
+        // overrun that image or overwrite the missing resident-boot stub.
+        if (image.size() < 0x1000 || image.size() > 0x3f000)
+            throw std::runtime_error("OB-12 Slave ROM has invalid size");
         std::copy(image.begin(), image.end(), flash.begin());
         // Every vector defaults to IsrNull at FC0002 until mapped.
         for (int vector = 0; vector < 256; vector++) set_vector(vector, 0xfc0002);

@@ -160,6 +160,7 @@ struct PanelView::Impl {
             return;
         std::vector<Run> parsed;
         parsed.reserve(count);
+        int clip_depth = 0;
         for (uint32_t r = 0; r < count; ++r) {
             Run item;
             uint8_t mode = 0;
@@ -170,6 +171,8 @@ struct PanelView::Impl {
                 commands > (size_t)(end - p) ||
                 commands > 1000000u) return;
             item.mode = mode;
+            if (mode == 4 && ++clip_depth > 32) return;
+            if (mode == 5 && --clip_depth < 0) return;
             item.kinds.reserve(commands);
             for (uint32_t i = 0; i < commands; ++i) {
                 uint8_t kind = 0;
@@ -184,6 +187,7 @@ struct PanelView::Impl {
             }
             parsed.push_back(std::move(item));
         }
+        if (clip_depth != 0 || p != end) return;
         // Commit only once the complete art has been validated.
         art_w = new_w;
         art_h = new_h;

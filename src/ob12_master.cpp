@@ -600,6 +600,10 @@ private:
 
     void place(const std::string& path, u32 offset) {
         auto data = read_file(path);
+        // Original ROMs are external files: never let a truncated/oversized
+        // replacement write beyond the 1-MiB emulated flash image.
+        if (offset > flash.size() || data.size() > flash.size() - offset)
+            throw std::runtime_error("OB-12 Master ROM exceeds flash address space: " + path);
         std::copy(data.begin(), data.end(), flash.begin() + offset);
     }
     Stat& touch(std::map<u32, Stat>& table, u32 key) {
