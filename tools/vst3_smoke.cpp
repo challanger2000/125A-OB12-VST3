@@ -406,6 +406,20 @@ int main(int, char** argv) {
     component->queryInterface(IAudioProcessor::iid, (void**)&audio);
     ProcessSetup setup{kRealtime, kSample32, 512, 44100};  // not the machine's rate, on purpose
     audio->setupProcessing(setup);
+    const uint32_t latency_at_44100=audio->getLatencySamples();
+    // Verify host-PDC follows the known 2,784-frame producer lead.
+    setup.sampleRate=48000;
+    const bool setup_48=audio->setupProcessing(setup)==kResultOk;
+    const uint32_t latency_at_48000=audio->getLatencySamples();
+    setup.sampleRate=96000;
+    const bool setup_96=audio->setupProcessing(setup)==kResultOk;
+    const uint32_t latency_at_96000=audio->getLatencySamples();
+    setup.sampleRate=44100;
+    const bool setup_restore=audio->setupProcessing(setup)==kResultOk;
+    const bool latency_ok=setup_48&&setup_96&&setup_restore&&
+        latency_at_44100==2558&&latency_at_48000==2784&&latency_at_96000==5568;
+    std::printf("P007_MIDI_SCHEDULER_PDC=%s 44100=%u 48000=%u 96000=%u\n",
+                latency_ok?"PASS":"FAIL",latency_at_44100,latency_at_48000,latency_at_96000);
     component->setActive(true);
     audio->setProcessing(true);
 
@@ -596,6 +610,91 @@ int main(int, char** argv) {
                     separation);
         return ok;
     }();
+    // 513th MIDI message forces a queue recovery. The note-off is deliberately
+    // rejected: the worker must first deliver the 512 accepted messages and THEN
+    // inject CC123/CC120. A premature panic can leave the note sounding.
+    const bool recovery_ok=[&]() -> bool {
+        events.list.clear();
+        changes.list.clear();
+        Event on{};
+        on.type=Event::kNoteOnEvent;
+        on.sampleOffset=64;
+        on.noteOn.pitch=102;
+        on.noteOn.velocity=0.75f;
+        events.list.push_back(on);
+        const uint8_t clock=0xF8;
+        for(int n=0;n<520;++n) {
+            Event tick{};
+            tick.type=Event::kDataEvent;
+            tick.sampleOffset=64;
+            tick.data.bytes=&clock;
+            tick.data.size=1;
+            events.list.push_back(tick);
+        }
+        Event discarded_off{};
+        discarded_off.type=Event::kNoteOffEvent;
+        discarded_off.sampleOffset=400;
+        discarded_off.noteOff.pitch=102;
+        discarded_off.noteOff.velocity=0.0f;
+        events.list.push_back(discarded_off);
+        const bool published=audio->process(data)==kResultOk;
+        events.list.clear();
+        bool recovered=false;
+        for(int n=0;n<260&&!recovered;++n) {
+            if(audio->process(data)!=kResultOk)break;
+            Sleep(4);
+            std::ifstream probe(probe_path);
+            std::string line;
+            while(std::getline(probe,line))
+                if(line.find("P007_RECOVERY frame=")!=std::string::npos)recovered=true;
+        }
+        // After recovery a new note-on and a matching note-off must be
+        // accepted again. Verify that both reached the original feeder.
+        Event again{};
+        again.type=Event::kNoteOnEvent;
+        again.sampleOffset=64;
+        again.noteOn.pitch=103;
+        again.noteOn.velocity=0.7f;
+        events.list.push_back(again);
+        bool restart=audio->process(data)==kResultOk;
+        events.list.clear();
+        Event off{};
+        off.type=Event::kNoteOffEvent;
+        off.sampleOffset=320;
+        off.noteOff.pitch=103;
+        events.list.push_back(off);
+        restart=restart&&audio->process(data)==kResultOk;
+        events.list.clear();
+        for(int n=0;n<35;++n) {restart=restart&&audio->process(data)==kResultOk;Sleep(3);}
+        std::ifstream probe(probe_path);
+        std::string line;
+        int ticks=0;
+        bool before=false,marker=false,after_on=false,after_off=false,early=false;
+        while(std::getline(probe,line)) {
+            unsigned long long target=0,actual=0;
+            unsigned status=0,pitch=0;
+            if(line.find("P007_RECOVERY frame=")!=std::string::npos) {
+                if(!marker) marker=true;
+                continue;
+            }
+            if(std::sscanf(line.c_str(),
+                "P007_DISPATCH target=%llu actual=%llu status=%u pitch=%u",
+                &target,&actual,&status,&pitch)!=4)continue;
+            if(status==248 && !marker)++ticks;
+            if(status==144&&pitch==102) {
+                before=!marker;
+                early=early||marker;
+            }
+            if(status==144&&pitch==103)after_on=marker;
+            if(status==128&&pitch==103)after_off=marker;
+        }
+        const bool ok=published&&recovered&&restart&&marker&&!early&&before&&
+                      ticks==511&&after_on&&after_off;
+        std::printf("P007_MIDI_SATURATION_RECOVERY=%s accepted_clocks=%d expected=511 "
+                    "note_before=%d marker=%d note_after=%d off_after=%d\n",
+                    ok?"PASS":"FAIL",ticks,(int)before,(int)marker,(int)after_on,(int)after_off);
+        return ok;
+    }();
     audio->setProcessing(false);
     component->setActive(false);
     component->terminate();
@@ -604,5 +703,5 @@ int main(int, char** argv) {
     SetEnvironmentVariableA("OB12_MIDI_PROBE", nullptr);
     const bool reload_ok = test_second_plugin_instance(argv[1]);
     return audio_ok && preselect_browser_ok && state_ok && browser_ok &&
-           deferred_frame_ok && midi_bridge_ok && timing_ok && reload_ok ? 0 : 2;
+           deferred_frame_ok && midi_bridge_ok && timing_ok && latency_ok && recovery_ok && reload_ok ? 0 : 2;
 }

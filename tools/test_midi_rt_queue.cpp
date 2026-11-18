@@ -43,5 +43,23 @@ int main() {
     while(auto* e=q.front()) {if(!require(e->frame==actual,"final boundary"))return 9; ++consumed;q.pop();}
     if(!require(consumed==5 && q.empty(),"all timed messages dispatched"))return 10;
     std::puts("P007_MIDI_QUEUE_TIMING_AND_BOUNDS=PASS");
+
+    // Overflow is a recovery FENCE, not an immediate CC123. A panic before
+    // the accepted NoteOn backlog would leave those accepted notes ringing.
+    q.reset_after_stop();
+    for(int i=0;i<8;++i)
+        if(!require(q.push(100,note,3),"overload fixture filled"))return 11;
+    if(!require(!q.push(100,note,3) && q.recovery_pending(),"overflow requests recovery"))return 12;
+    if(!require(!q.finish_recovery_after_drain(),"recovery cannot overtake accepted notes"))return 14;
+    for(int i=0;i<8;++i) {
+        if(i==4 && !require(!q.push(101,note,3),"no new voices during recovery"))return 15;
+        if(!require(!q.finish_recovery_after_drain(),"no early panic until ALL notes delivered"))return 14;
+        if(!require(q.front()!=nullptr,"retained accepted note"))return 16;
+        q.pop();
+    }
+    if(!require(q.finish_recovery_after_drain(),"one recovery after backlog drained"))return 17;
+    if(!require(!q.recovery_pending() && q.empty(),"recovery rearmed"))return 18;
+    if(!require(q.push(102,note,3),"new notes accepted after recovery"))return 19;
+    std::puts("P007_MIDI_OVERFLOW_RECOVERY_ORDER=PASS");
     return 0;
 }

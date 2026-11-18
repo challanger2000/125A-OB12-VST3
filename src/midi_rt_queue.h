@@ -20,11 +20,18 @@ public:
     };
 
     // Audio thread only. Retains contents independently of host-owned Event memory.
+    // After overload reject all new events until the feeder has delivered every
+    // already-accepted event and queued its all-notes-off recovery. Accepting
+    // new notes before the recovery could leave them sounding indefinitely.
     bool push(uint64_t frame, const uint8_t* bytes, std::size_t length) noexcept {
+        if (recovering_.load(std::memory_order_acquire)) return false;
         if (!bytes || !length || length > MaxBytes) return false;
         const uint32_t w = write_.load(std::memory_order_relaxed);
         const uint32_t r = read_.load(std::memory_order_acquire);
-        if ((uint32_t)(w - r) >= Capacity) return false;
+        if ((uint32_t)(w - r) >= Capacity) {
+            request_recovery();
+            return false;
+        }
         Entry& slot = items_[w & (Capacity - 1)];
         slot.frame = frame;
         slot.length = (uint16_t)length;
@@ -58,12 +65,31 @@ public:
     void pop() noexcept { read_.store(read_.load(std::memory_order_relaxed) + 1,
                                        std::memory_order_release); }
     bool empty() const noexcept { return front() == nullptr; }
+
+    // RT producer may also request recovery after a truncated, excessively
+    // large, or invalid host event. This is a latch, not a stream message.
+    void request_recovery() noexcept { recovering_.store(true, std::memory_order_release); }
+    bool recovery_pending() const noexcept {
+        return recovering_.load(std::memory_order_acquire);
+    }
+    // Feeder thread ONLY. Must run after draining the accepted queue.
+    bool finish_recovery_after_drain() noexcept {
+#if defined(P007_TEST_EARLY_RECOVERY_MUTANT)
+        // Test-only historical bug: release voices before prior queued notes.
+        return recovering_.exchange(false, std::memory_order_acq_rel);
+#else
+        if (!empty()) return false;
+        return recovering_.exchange(false, std::memory_order_acq_rel);
+#endif
+    }
     void reset_after_stop() noexcept {
         read_.store(0, std::memory_order_relaxed);
         write_.store(0, std::memory_order_relaxed);
+        recovering_.store(false, std::memory_order_relaxed);
     }
 private:
     std::array<Entry, Capacity> items_{};
     std::atomic<uint32_t> write_{0};
     std::atomic<uint32_t> read_{0};
+    std::atomic<bool> recovering_{false};
 };

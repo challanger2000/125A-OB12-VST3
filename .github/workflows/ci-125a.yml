@@ -43,6 +43,12 @@ jobs:
           if not errorlevel 7 exit /b 1
           findstr /C:"P007_MIDI_QUEUE_FAIL=exact 48-kHz event boundary" build\p007-mutant.log >nul
           if errorlevel 1 exit /b 1
+          clang-cl /nologo /O2 /EHsc /std:c++17 /DP007_TEST_EARLY_RECOVERY_MUTANT /Isrc tools\test_midi_rt_queue.cpp /Fe:build\test_midi_rt_early_recovery_mutant.exe
+          if errorlevel 1 exit /b 1
+          build\test_midi_rt_early_recovery_mutant.exe > build\p007-early-recovery-mutant.log
+          if not errorlevel 14 exit /b 1
+          findstr /C:"P007_MIDI_QUEUE_FAIL=recovery cannot overtake accepted notes" build\p007-early-recovery-mutant.log >nul
+          if errorlevel 1 exit /b 1
       - name: Link real Windows VST3 library (without firmware)
         shell: cmd
         run: |

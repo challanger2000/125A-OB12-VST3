@@ -116,7 +116,6 @@ struct Instrument {
     std::vector<float> ring = std::vector<float>(ring_size * 2);
     std::atomic<uint64_t> written{0}, read{0};
     MidiRtQueue<512,4096> midi_queue;
-    std::atomic<bool> midi_panic_pending{false};
     std::atomic<uint64_t> midi_queue_drops{0};
     std::atomic<long> underruns{0};
     AnalogOut analog;
@@ -159,7 +158,15 @@ struct Instrument {
                         engine->midi_deferred(message->bytes.data(), (int)message->length);
                         midi_queue.pop();
                     }
-                    if (midi_panic_pending.exchange(false, std::memory_order_acq_rel)) {
+                    if (midi_queue.finish_recovery_after_drain()) {
+                        // All accepted MIDI must be handed to the original firmware
+                        // BEFORE panic; otherwise notes dispatched after panic can stick.
+                        // This worker-side diagnostic is not part of the RT callback.
+                        if (dispatch_probe) {
+                            fprintf(dispatch_probe, "P007_RECOVERY frame=%llu\n",
+                                    (unsigned long long)current);
+                            fflush(dispatch_probe);
+                        }
                         // Overflow recovery never runs on the host's audio thread.
                         for (int ch=0; ch<16; ++ch) {
                             const uint8_t off[3] = {(uint8_t)(0xB0|ch), 123, 0};
@@ -197,7 +204,6 @@ struct Instrument {
             return false;
         }
         midi_queue.reset_after_stop();
-        midi_panic_pending.store(false, std::memory_order_relaxed);
         std::fill(ring.begin(), ring.end(), 0.0f);
         written.store(0, std::memory_order_relaxed);
         read.store(0, std::memory_order_relaxed);
@@ -585,7 +591,14 @@ public:
         return kResultOk;
     }
     tresult PLUGIN_API canProcessSampleSize(int32 size) override { return size == kSample32 ? kResultTrue : kResultFalse; }
-    uint32 PLUGIN_API getLatencySamples() override { return 0; }
+    // The bridge deliberately schedules host MIDI 2,784 native 48-kHz frames
+    // ahead of the consumer (2,304 ring lead + 480 worker safety frames).
+    // Report this KNOWN minimum to host PDC; original UART/firmware polling
+    // may add additional latency and still requires acoustic measurement.
+    uint32 PLUGIN_API getLatencySamples() override {
+        const double sample_rate = std::isfinite(rate) && rate > 0.0 ? rate : 48000.0;
+        return (uint32)std::llround(2784.0 * sample_rate / 48000.0);
+    }
     tresult PLUGIN_API setupProcessing(ProcessSetup& setup) override { rate = setup.sampleRate; return kResultOk; }
     tresult PLUGIN_API setProcessing(TBool) override { return kResultOk; }
     uint32 PLUGIN_API getTailSamples() override { return kInfiniteTail; }
@@ -627,10 +640,11 @@ public:
             std::array<Message,2048> list{};
             int used = 0, order = 0;
             bool raw_channel_messages = false;
+            bool malformed_or_saturated = false;
             auto add = [&](const Message& message) {
                 if (used >= (int)list.size()) {
                     inst->midi_queue_drops.fetch_add(1, std::memory_order_relaxed);
-                    inst->midi_panic_pending.store(true, std::memory_order_release);
+                    malformed_or_saturated = true;
                 } else list[used++] = message;
             };
             if (data.inputEvents) {
@@ -656,7 +670,7 @@ public:
                     } else if (e.type == Event::kDataEvent && e.data.bytes && e.data.size) {
                         if (e.data.size > 4096) {
                             inst->midi_queue_drops.fetch_add(1, std::memory_order_relaxed);
-                            inst->midi_panic_pending.store(true, std::memory_order_release);
+                            malformed_or_saturated = true;
                             continue;
                         }
                         const uint8_t status = e.data.bytes[0];
@@ -721,13 +735,15 @@ public:
                     (uint64_t)std::llround((double)offset * native_per_host);
                 if (!inst->midi_queue.push(target,bytes,m.count)) {
                     inst->midi_queue_drops.fetch_add(1, std::memory_order_relaxed);
-                    inst->midi_panic_pending.store(true, std::memory_order_release);
+                    malformed_or_saturated = true;
                     continue;
                 }
                 // The DAW may getState immediately after process without the feeder
                 // having reached this future MIDI frame yet.
                 inst->engine->observe_host_midi(bytes, m.count);
             }
+            if (malformed_or_saturated)
+                inst->midi_queue.request_recovery();
         }
         if (data.numSamples <= 0 || data.numOutputs < 1 || !data.outputs || data.outputs[0].numChannels < 1) return kResultOk;
         auto& out = data.outputs[0];
