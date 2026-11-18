@@ -26,6 +26,7 @@ public:
         load_names(0, rom_dir_ + "\\presets\\12prgFS.bin");
         load_names(1, rom_dir_ + "\\presets\\12tmbFS.bin");
         load_favorites();
+        find_banks();
     }
     ~PresetBrowser() {
         close();
@@ -61,13 +62,15 @@ public:
 private:
     enum : int {
         id_type = 3101, id_bank, id_search, id_list, id_favorite,
-        id_only_favorites, id_import, id_close, id_status
+        id_only_favorites, id_import, id_close, id_status, id_library
     };
     Engine& engine_;
     std::string rom_dir_;
     HWND window_ = nullptr, type_ = nullptr, bank_ = nullptr, search_ = nullptr;
     HWND list_ = nullptr, status_ = nullptr, favorite_ = nullptr, only_favorites_ = nullptr;
-    HWND title_ = nullptr, import_ = nullptr, close_ = nullptr;
+    HWND title_ = nullptr, import_ = nullptr, close_ = nullptr, library_ = nullptr;
+    struct BankPair { std::wstring title, program_path, timbre_path; };
+    std::vector<BankPair> bank_pairs_;
     HBRUSH background_ = nullptr, field_brush_ = nullptr;
     HFONT font_ = nullptr;
     std::array<std::array<std::string, 256>, 2> names_{};
@@ -273,40 +276,81 @@ private:
         save_favorites();
         fill();
     }
+    static void enumerate_banks(const std::wstring& directory, std::vector<BankPair>& into) {
+        std::wstring mask = directory + L"\\12prg??.mid";
+        WIN32_FIND_DATAW info = {};
+        HANDLE search = FindFirstFileW(mask.c_str(), &info);
+        if (search == INVALID_HANDLE_VALUE) return;
+        do {
+            if (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            std::wstring program = info.cFileName;
+            if (program.size() != 11 || lower(program).substr(0, 5) != L"12prg" ||
+                lower(program).substr(7) != L".mid") continue;
+            std::wstring suffix = program.substr(5, 2);
+            std::wstring timbre = L"12tmb" + suffix + L".mid";
+            std::wstring timbre_path = directory + L"\\" + timbre;
+            if (GetFileAttributesW(timbre_path.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+            BankPair pair{suffix + L" — " + directory, directory + L"\\" + program, timbre_path};
+            bool duplicate = false;
+            for (const BankPair& old : into)
+                if (lower(old.program_path) == lower(pair.program_path)) duplicate = true;
+            if (!duplicate) into.push_back(std::move(pair));
+        } while (FindNextFileW(search, &info));
+        FindClose(search);
+    }
+    void find_banks() {
+        bank_pairs_.clear();
+        enumerate_banks(wide(rom_dir_) + L"\\presets", bank_pairs_);
+        if (const char* appdata = getenv("LOCALAPPDATA"))
+            enumerate_banks(wide(appdata) + L"\\OB12\\SoundBanks", bank_pairs_);
+        std::sort(bank_pairs_.begin(), bank_pairs_.end(),
+                  [](const BankPair& a, const BankPair& b) { return lower(a.title) < lower(b.title); });
+        if (library_) {
+            SendMessageW(library_, CB_RESETCONTENT, 0, 0);
+            SendMessageW(library_, CB_ADDSTRING, 0, (LPARAM)L"Choose a soundbank pair, or browse for .mid/.syx...");
+            for (const BankPair& entry : bank_pairs_)
+                SendMessageW(library_, CB_ADDSTRING, 0, (LPARAM)entry.title.c_str());
+            SendMessageW(library_, CB_SETCURSEL, 0, 0);
+        }
+    }
     void import_bank() {
-        wchar_t path[32768] = {};
-        OPENFILENAMEW dlg = {sizeof dlg};
-        dlg.hwndOwner = window_;
-        dlg.lpstrFile = path;
-        dlg.nMaxFile = (DWORD)(sizeof(path) / sizeof(path[0]));
-        dlg.lpstrFilter = L"OB-12 SysEx / MIDI bank (*.syx;*.mid)\0*.syx;*.mid\0All files\0*.*\0";
-        dlg.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-        if (!GetOpenFileNameW(&dlg)) return;
-        std::wstring chosen(path);
-        std::wstring filename = chosen.substr(chosen.find_last_of(L"\\/") + 1);
-        std::wstring file_lower = lower(filename);
-        bool is_program = file_lower.size() == 11 && file_lower.substr(0, 5) == L"12prg" &&
-                          file_lower.substr(7) == L".mid";
-        bool is_timbre = file_lower.size() == 11 && file_lower.substr(0, 5) == L"12tmb" &&
-                         file_lower.substr(7) == L".mid";
-
         std::wstring program_file, timbre_file;
-        if (is_program || is_timbre) {
-            std::wstring dir = chosen.substr(0, chosen.find_last_of(L"\\/") + 1);
-            std::wstring id = filename.substr(5, 2);
-            program_file = dir + L"12prg" + id + L".mid";
-            timbre_file = dir + L"12tmb" + id + L".mid";
-            if (GetFileAttributesW(program_file.c_str()) == INVALID_FILE_ATTRIBUTES ||
-                GetFileAttributesW(timbre_file.c_str()) == INVALID_FILE_ATTRIBUTES) {
-                MessageBoxW(window_,
-                    L"A matching 12prgXX.mid and 12tmbXX.mid pair is required. "
-                    L"Both files must be in the same folder.",
-                    L"Incomplete OB-12 soundbank", MB_OK | MB_ICONWARNING);
-                return;
-            }
+        int chosen_pair = library_ ? (int)SendMessageW(library_, CB_GETCURSEL, 0, 0) - 1 : -1;
+        if (chosen_pair >= 0 && chosen_pair < (int)bank_pairs_.size()) {
+            program_file = bank_pairs_[chosen_pair].program_path;
+            timbre_file = bank_pairs_[chosen_pair].timbre_path;
         } else {
-            // Standalone .syx files are supported too; they can overwrite memory.
-            program_file = chosen;
+            wchar_t path[32768] = {};
+            OPENFILENAMEW dlg = {sizeof dlg};
+            dlg.hwndOwner = window_;
+            dlg.lpstrFile = path;
+            dlg.nMaxFile = (DWORD)(sizeof(path) / sizeof(path[0]));
+            dlg.lpstrFilter = L"OB-12 SysEx / MIDI bank (*.syx;*.mid)\0*.syx;*.mid\0All files\0*.*\0";
+            dlg.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+            if (!GetOpenFileNameW(&dlg)) return;
+            std::wstring chosen(path);
+            std::wstring filename = chosen.substr(chosen.find_last_of(L"\\/") + 1);
+            std::wstring file_lower = lower(filename);
+            bool is_program = file_lower.size() == 11 && file_lower.substr(0, 5) == L"12prg" &&
+                              file_lower.substr(7) == L".mid";
+            bool is_timbre = file_lower.size() == 11 && file_lower.substr(0, 5) == L"12tmb" &&
+                             file_lower.substr(7) == L".mid";
+            if (is_program || is_timbre) {
+                std::wstring dir = chosen.substr(0, chosen.find_last_of(L"\\/") + 1);
+                std::wstring id = filename.substr(5, 2);
+                program_file = dir + L"12prg" + id + L".mid";
+                timbre_file = dir + L"12tmb" + id + L".mid";
+                if (GetFileAttributesW(program_file.c_str()) == INVALID_FILE_ATTRIBUTES ||
+                    GetFileAttributesW(timbre_file.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                    MessageBoxW(window_,
+                        L"A matching 12prgXX.mid and 12tmbXX.mid pair is required. "
+                        L"Both files must be in the same folder.",
+                        L"Incomplete OB-12 soundbank", MB_OK | MB_ICONWARNING);
+                    return;
+                }
+            } else {
+                program_file = chosen;
+            }
         }
 
         std::vector<uint8_t> programs, timbres;
@@ -331,14 +375,8 @@ private:
         if (!programs.empty()) engine_.send_sysex(programs.data(), (int)programs.size());
 
         std::vector<unsigned char> image;
-        if (!timbres.empty()) {
-            names_[1].fill({});
-            if (decode_bank(timbres, image)) scan_names(1, image);
-        }
-        if (!programs.empty()) {
-            names_[0].fill({});
-            if (decode_bank(programs, image)) scan_names(0, image);
-        }
+        if (!timbres.empty() && decode_bank(timbres, image)) scan_names(1, image);
+        if (!programs.empty() && decode_bank(programs, image)) scan_names(0, image);
         fill();
         text_status(L"Bank import queued. Wait for MIDI transfer to complete before browsing.");
     }
@@ -350,7 +388,8 @@ private:
             if (font_ && hwnd) SendMessageW(hwnd, WM_SETFONT, (WPARAM)font_, TRUE);
             return hwnd;
         };
-        title_ = control(L"STATIC", L"125A  /  OB-12 PRESET BROWSER", SS_LEFT, 0);
+        title_ = control(L"STATIC", L"125A  /  OB-12 PRESET BROWSER  |  ACTIVE MEMORY", SS_LEFT, 0);
+        library_ = control(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, id_library);
         type_ = control(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, id_type);
         bank_ = control(L"COMBOBOX", L"", CBS_DROPDOWNLIST, id_bank);
         search_ = control(L"EDIT", L"", ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, id_search);
@@ -367,17 +406,19 @@ private:
         SendMessageW(bank_, CB_ADDSTRING, 0, (LPARAM)L"Bank A");
         SendMessageW(bank_, CB_ADDSTRING, 0, (LPARAM)L"Bank B");
         SendMessageW(bank_, CB_SETCURSEL, 0, 0);
+        find_banks();
         fill();
     }
     void layout(int width, int height) {
         width = std::max(width, 510);
         height = std::max(height, 390);
         // Never enumerate sibling HWNDs: creation/Z-order can differ across Windows hosts.
-        if (title_) MoveWindow(title_, 20, 14, width - 40, 27, TRUE);
-        if (type_) MoveWindow(type_, 20, 52, 165, 200, TRUE);
-        if (bank_) MoveWindow(bank_, 195, 52, 135, 200, TRUE);
-        if (search_) MoveWindow(search_, 340, 52, width - 360, 27, TRUE);
-        if (list_) MoveWindow(list_, 20, 90, width - 40, height - 196, TRUE);
+        if (title_) MoveWindow(title_, 20, 10, width - 40, 25, TRUE);
+        if (library_) MoveWindow(library_, 20, 38, width - 40, 350, TRUE);
+        if (type_) MoveWindow(type_, 20, 76, 165, 200, TRUE);
+        if (bank_) MoveWindow(bank_, 195, 76, 135, 200, TRUE);
+        if (search_) MoveWindow(search_, 340, 76, width - 360, 27, TRUE);
+        if (list_) MoveWindow(list_, 20, 115, width - 40, height - 221, TRUE);
         if (favorite_) MoveWindow(favorite_, 20, height - 92, 150, 30, TRUE);
         if (only_favorites_) MoveWindow(only_favorites_, 180, height - 92, 155, 30, TRUE);
         if (import_) MoveWindow(import_, width - 305, height - 92, 160, 30, TRUE);
@@ -410,6 +451,10 @@ private:
             return 0;
         }
         case WM_COMMAND:
+            if (LOWORD(w) == id_library && HIWORD(w) == CBN_SELCHANGE) {
+                self->text_status(L"Soundbank selected. Press 'Load Bank Pair' to transfer it to the original OB-12 memory.");
+                return 0;
+            }
             if (LOWORD(w) == id_type || LOWORD(w) == id_bank) {
                 if (HIWORD(w) == CBN_SELCHANGE) self->fill();
                 return 0;
@@ -447,7 +492,7 @@ private:
             KillTimer(wnd, 1);
             self->window_ = nullptr;
             self->type_ = self->bank_ = self->search_ = self->list_ = self->status_ = nullptr;
-            self->title_ = self->favorite_ = self->only_favorites_ = self->import_ = self->close_ = nullptr;
+            self->title_ = self->favorite_ = self->only_favorites_ = self->import_ = self->close_ = self->library_ = nullptr;
             return 0;
         }
         return DefWindowProcW(wnd, msg, w, l);
