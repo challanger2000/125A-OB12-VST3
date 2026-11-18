@@ -22,6 +22,8 @@ public:
     // the factory image; after the firmware writes flash and goes quiet for a second, the
     // sectors that differ from the factory image are saved there again, and at the end.
     void set_flash_file(const std::string& path);
+    bool snapshot_flash(std::vector<uint8_t>& bytes);     // consistent 1-MiB image, copied by engine thread
+    bool restore_flash(const std::vector<uint8_t>& bytes); // call before engine audio starts
     long flash_writes() const;                           // erases and words programmed so far
 
     // A .syx (or the sysex of a .mid) as a sequencer plays it into MIDI IN: one message at a time,
