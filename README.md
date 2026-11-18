@@ -4,7 +4,7 @@ This repository is a derivative of [Tuth/ob12-emu](https://github.com/Tuth/ob12-
 It adds a native searchable **Program/Timbre Preset Browser**, paired \`12prgXX.mid\` /
 \`12tmbXX.mid\` import, and preliminary **per-DAW-project flash-state recall**.
 
-**Status:** Windows source compilation has passed in CI. A full linked VST3, firmware-backed
+**Status:** Windows source compilation and full VST3 linking (without firmware) have passed in CI. Firmware-backed
 sound test, Steinberg validator run and Studio One acceptance are still outstanding.
 Do not replace a working original OB12.vst3 with this branch before those tests.
 
