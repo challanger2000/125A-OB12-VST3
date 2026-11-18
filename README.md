@@ -1,3 +1,30 @@
+# 125A OB-12 VST3 — development branch
+
+This repository is a derivative of [Tuth/ob12-emu](https://github.com/Tuth/ob12-emu) under GPL-3.0.
+It adds a native searchable **Program/Timbre Preset Browser**, paired \`12prgXX.mid\` /
+\`12tmbXX.mid\` import, and preliminary **per-DAW-project flash-state recall**.
+
+**Status:** Windows source compilation has passed in CI. A full linked VST3, firmware-backed
+sound test, Steinberg validator run and Studio One acceptance are still outstanding.
+Do not replace a working original OB12.vst3 with this branch before those tests.
+
+**Open browser:** right-click the existing OB-12 hardware panel and select **Preset Browser...**.
+Use Programs/Timbres + Bank A/B; click a slot to send the documented MIDI bank select / program change.
+The original OB-12 MIDI Program Map must be disabled for the standard slot mapping.
+
+**Bank pairs:** import both \`12prgXX.mid\` and \`12tmbXX.mid\` together using **Load Bank Pair**.
+This streams SysEx into the original firmware and can overwrite flash; it is not a read-only
+multiple-bank browser yet. Save your project first.
+
+**Build on Windows:** install Visual Studio 2022 LLVM support, Python 3 and Steinberg VST3
+SDK 3.7.12; set \`OB12_VST3SDK\`; supply your **own** original firmware in \`rom/\`; then run
+\`tools\build_125A.bat\`. The firmware is not tracked in this repository.
+
+See [the 125A source audit](docs/125A-CODE-AUDIT.md) for confirmed fixes, limitations and
+the required DAW/regression tests.
+
+---
+
 # ob12-emu
 
 A hardware-level emulator of the **Oberheim OB-12** (Viscount, 2000), a virtual analog synthesizer.
