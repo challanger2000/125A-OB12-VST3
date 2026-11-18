@@ -573,6 +573,9 @@ public:
             struct Message { int32 offset; int order; uint8_t bytes[3]; int count; std::vector<uint8_t> raw; };
             std::vector<Message> list;
             int order = 0;
+            // Duplicate raw MIDI and mapped CC/bend is a per-callback concern.
+            // A sticky flag suppresses mapped MIDI forever after one raw event.
+            bool raw_channel_messages = false;
             if (data.inputEvents) {
                 int32 count = data.inputEvents->getEventCount();
                 for (int32 i = 0; i < count; i++) {
@@ -687,7 +690,6 @@ private:
     std::atomic<int> active_callbacks{0};
     std::vector<uint8_t> project_flash; // exact serialized original memory
     int project_preset = -1;
-    bool raw_channel_messages = false;  // the host sends channel messages as raw MIDI data events
     std::mutex instrument_lock;
     double rate = 48000;
 };

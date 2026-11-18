@@ -501,6 +501,54 @@ int main(int, char** argv) {
     printf("PROJECT_STATE_TEST=%s bytes=%zu\n", state_ok ? "PASS" : "FAIL", state.storage.size());
     const bool browser_ok = test_scale(component, &state);
     const bool deferred_frame_ok = test_studio_one_delayed_frame(component);
+
+    // P007 independent host-boundary regression: a single raw channel event may
+    // suppress the host's mirrored parameter mapping in THAT block, but never
+    // disable mapped CCs on subsequent callbacks.
+    // The original sticky raw_channel_messages field fails this test (263 vs 7).
+    const bool midi_bridge_ok = [&]() -> bool {
+        auto raw = [&](const uint8_t* bytes, uint32_t size) {
+            Event e{};
+            e.type = Event::kDataEvent;
+            e.data.bytes = bytes;
+            e.data.size = size;
+            events.list.push_back(e);
+        };
+        auto selected = [&]() -> int32_t {
+            MemoryState state;
+            if (component->getState(&state) != kResultOk ||
+                state.storage.size() != 0x100000 + 24) return -100;
+            int32_t slot = -100;
+            std::memcpy(&slot, state.storage.data() + 20, sizeof slot);
+            return slot;
+        };
+        const uint8_t bank_program[] = {0xB0,0x00,0x40};
+        const uint8_t bank_slot[] = {0xB0,0x20,0x00};
+        const uint8_t program[] = {0xC0,0x07};
+        changes.list.clear();
+        events.list.clear();
+        raw(bank_program, 3); raw(bank_slot, 3); raw(program, 2);
+        const bool injected = audio->process(data) == kResultOk;
+        const int32_t before = selected();  // Program A-008 => 256 + 7
+        events.list.clear();
+        changes.list.clear();
+        Queue msb; msb.id = 0; msb.value = 0.0;
+        Queue lsb; lsb.id = 32; lsb.value = 0.0;
+        changes.list.push_back(msb); changes.list.push_back(lsb);
+        const bool mapped_ok = audio->process(data) == kResultOk;
+        changes.list.clear();
+        events.list.clear();
+        raw(program, 2);
+        const bool after_ok = audio->process(data) == kResultOk;
+        const int32_t after = selected();  // Timbre A-008 => 7
+        changes.list.clear();
+        events.list.clear();
+        const bool ok = injected && mapped_ok && after_ok &&
+                        before == 263 && after == 7;
+        std::printf("P007_MIDI_RAW_THEN_MAPPED_CC=%s first=%d last=%d\n",
+                    ok ? "PASS" : "FAIL", (int)before, (int)after);
+        return ok;
+    }();
     audio->setProcessing(false);
     component->setActive(false);
     component->terminate();
@@ -508,5 +556,5 @@ int main(int, char** argv) {
     FreeLibrary(dll);
     const bool reload_ok = test_second_plugin_instance(argv[1]);
     return audio_ok && preselect_browser_ok && state_ok && browser_ok &&
-           deferred_frame_ok && reload_ok ? 0 : 2;
+           deferred_frame_ok && midi_bridge_ok && reload_ok ? 0 : 2;
 }
