@@ -70,6 +70,11 @@ jobs:
         run: |
           python tools\factory_name_probe.py build\OB12.vst3\Contents\x86_64-win\rom\presets\12prgFS.bin build\OB12.vst3\Contents\x86_64-win\rom\presets\12tmbFS.bin
           if errorlevel 1 exit /b 1
+      - name: Generate transient playable alternate bank for browser regression
+        shell: cmd
+        run: |
+          python tools\generate_bank_fixture.py build\OB12.vst3\Contents\x86_64-win\rom\presets build\bank-tests UI --ui-names
+          if errorlevel 1 exit /b 1
       - name: Build translated DSP and link firmware-backed Windows VST3
         shell: cmd
         timeout-minutes: 8

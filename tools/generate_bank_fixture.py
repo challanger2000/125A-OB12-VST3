@@ -65,8 +65,8 @@ def midi_bank(image: bytes, base: int, label: str) -> bytes:
     return b"MThd" + struct.pack(">IHHH", 6, 0, 1, 384) + b"MTrk" + struct.pack(">I",len(track)) + track
 
 def main():
-    if len(sys.argv) != 4:
-        sys.exit("usage: generate_bank_fixture.py <original rom/presets> <output folder> <suffix>")
+    if len(sys.argv) not in (4, 5) or (len(sys.argv) == 5 and sys.argv[4] != "--ui-names"):
+        sys.exit("usage: generate_bank_fixture.py <original rom/presets> <output folder> <suffix> [--ui-names]")
     rom, target, suffix = pathlib.Path(sys.argv[1]),pathlib.Path(sys.argv[2]),sys.argv[3]
     if not 2 <= len(suffix) <= 8 or not suffix.isalnum():
         sys.exit("suffix must be 2 to 8 ASCII alphanumeric characters")
@@ -78,6 +78,11 @@ def main():
         image=source.read_bytes()
         if len(image)!=nbytes:
             sys.exit(f"ERROR {source}: expected {nbytes} bytes; got {len(image)}")
+        if len(sys.argv) == 5 and sys.argv[4] == "--ui-names":
+            # Test-only alternate names; the factory record parameters remain
+            # untouched. The original SysEx checksums are recalculated.
+            test_name = b"UI Browser" if kind == "prg" else b"UI Timbre"
+            image = test_name.ljust(15, b" ") + b"\x00" + image[16:]
         out=target/f"12{kind}{suffix}.mid"
         out.write_bytes(midi_bank(image,base,label))
         checked_base,checked_image,details=decode(str(out))
