@@ -194,10 +194,12 @@ int main(int, char** argv) {
         f.write("RIFF", 4); u32(36 + bytes); f.write("WAVEfmt ", 8); u32(16); u16(1); u16(1); u32(44100); u32(88200); u16(2); u16(16);
         f.write("data", 4); u32(bytes); f.write((const char*)recording.data(), bytes);
     }
+    const bool audio_ok = first_sound > 10.0 && first_sound < 17.0 && frames > 0 && sum / frames > 1e-9;
+    printf("AUDIO_TEST=%s\n", audio_ok ? "PASS" : "FAIL");
     test_scale(component);
     audio->setProcessing(false);
     component->setActive(false);
     component->terminate();
     component->release();
-    return 0;
+    return audio_ok ? 0 : 2;
 }
