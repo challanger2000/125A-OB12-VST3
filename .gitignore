@@ -1,0 +1,5 @@
+# Decoded firmware stays out of version control: regenerate with tools/ob12_sysex.py
+rom/
+build/
+__pycache__/
+*.log
