@@ -16,6 +16,7 @@
 #include <cstring>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <vector>
 #include "ob12_engine.h"
 #include "panel_controls.h"
@@ -70,7 +71,9 @@ D2D1_COLOR_F color(uint32_t argb) {
 // The unit's colours, from Thor's photos: a royal blue panel, cream print, black knobs and keys.
 const uint32_t panel_blue = 0xff2251b0, panel_cream = 0xffece5c6;
 
-const wchar_t* class_name = L"OB12PanelView";
+const wchar_t* class_name = L"125A_OB12_PanelView_v2";
+std::mutex panel_class_mutex;
+unsigned panel_class_users = 0;
 
 std::atomic<int> gain_db{-1};  // -1: not read yet
 std::string gain_file(bool make_folder) {
@@ -97,6 +100,8 @@ struct PanelView::Impl {
     Engine& engine;
     std::unique_ptr<PresetBrowser> browser;
     HWND window = nullptr;
+    HMODULE window_module = nullptr;
+    bool class_acquired = false;
     ID2D1Factory* factory = nullptr;
     ID2D1RenderTarget* target = nullptr;        // the window's, or a WIC bitmap's for save_image
     ID2D1HwndRenderTarget* hwnd_target = nullptr;
@@ -959,17 +964,30 @@ PanelView::~PanelView() {
 }
 
 bool PanelView::attach(void* parent) {
-    static bool registered = false;
+    if (impl->window) return true;
     HMODULE module = nullptr;
-    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)&Impl::proc, &module);
-    if (!registered) {
-        WNDCLASSW wc = {};
-        wc.lpfnWndProc = Impl::proc;
-        wc.hInstance = module;
-        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-        wc.lpszClassName = class_name;
-        RegisterClassW(&wc);
-        registered = true;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+           reinterpret_cast<LPCWSTR>(&Impl::proc), &module)) return false;
+    {
+        std::lock_guard<std::mutex> guard(panel_class_mutex);
+        if (!impl->class_acquired) {
+            if (!panel_class_users) {
+                WNDCLASSW wc = {};
+                wc.lpfnWndProc = Impl::proc;
+                wc.hInstance = module; // DLL owner, never the DAW executable
+                wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+                wc.lpszClassName = class_name;
+                if (!RegisterClassW(&wc)) {
+                    WNDCLASSW existing = {};
+                    if (!GetClassInfoW(module, class_name, &existing) ||
+                         existing.lpfnWndProc != Impl::proc) return false;
+                }
+            }
+            ++panel_class_users;
+            impl->window_module = module;
+            impl->class_acquired = true;
+        }
     }
     RECT rc;
     GetClientRect((HWND)parent, &rc);
@@ -984,11 +1002,19 @@ bool PanelView::attach(void* parent) {
 
 void PanelView::detach() {
     if (impl->browser) impl->browser->close();
-    if (!impl->window) return;
-    KillTimer(impl->window, frame_timer);
-    impl->drop_target();
-    DestroyWindow(impl->window);
-    impl->window = nullptr;
+    if (impl->window) {
+        KillTimer(impl->window, frame_timer);
+        impl->drop_target();
+        DestroyWindow(impl->window);
+        impl->window = nullptr;
+    }
+    if (impl->class_acquired) {
+        std::lock_guard<std::mutex> guard(panel_class_mutex);
+        if (--panel_class_users == 0)
+            UnregisterClassW(class_name, impl->window_module);
+        impl->window_module = nullptr;
+        impl->class_acquired = false;
+    }
 }
 
 void PanelView::resize(int width, int height) {

@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
@@ -30,6 +31,7 @@ public:
     }
     ~PresetBrowser() {
         close();
+        release_window_class();
         if (font_) DeleteObject(font_);
         if (field_brush_) DeleteObject(field_brush_);
         if (background_) DeleteObject(background_);
@@ -41,25 +43,68 @@ public:
             SetForegroundWindow(window_);
             return;
         }
-        HINSTANCE instance = GetModuleHandleW(nullptr);
-        static bool registered = false;
-        if (!registered) {
-            WNDCLASSW wc = {};
-            wc.lpfnWndProc = &PresetBrowser::proc;
-            wc.hInstance = instance;
-            wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-            wc.lpszClassName = L"125A_OB12_PresetBrowser";
-            if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return;
-            registered = true;
-        }
+        // This WNDPROC belongs to the VST3 DLL, NOT the host executable.
+        // The old host-owned registration survived a FreeLibrary/LoadLibrary cycle
+        // and could call a stale DLL address on the second instrument instance.
+        if (!acquire_window_class()) return;
         HWND owner = GetAncestor(panel, GA_ROOT);
-        window_ = CreateWindowExW(WS_EX_TOOLWINDOW, L"125A_OB12_PresetBrowser",
+        window_ = CreateWindowExW(WS_EX_TOOLWINDOW, window_class(),
              L"125A OB-12 | Preset Browser", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-             CW_USEDEFAULT, CW_USEDEFAULT, 700, 600, owner, nullptr, instance, this);
+             CW_USEDEFAULT, CW_USEDEFAULT, 700, 600, owner, nullptr, window_module_, this);
         if (window_) SetForegroundWindow(window_);
     }
 
 private:
+    static LPCWSTR window_class() { return L"125A_OB12_PresetBrowser_v2"; }
+    struct ClassRegistry {
+        std::mutex lock;
+        unsigned users = 0;
+        HINSTANCE module = nullptr;
+    };
+    static ClassRegistry& registry() {
+        static ClassRegistry item;
+        return item;
+    }
+    bool acquire_window_class() {
+        if (class_acquired_) return true;
+        HMODULE module = nullptr;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                 GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                 reinterpret_cast<LPCWSTR>(&PresetBrowser::proc), &module)) return false;
+        ClassRegistry& state = registry();
+        std::lock_guard<std::mutex> guard(state.lock);
+        if (!state.users) {
+            WNDCLASSW wc = {};
+            wc.lpfnWndProc = &PresetBrowser::proc;
+            wc.hInstance = module;
+            wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+            wc.lpszClassName = window_class();
+            if (!RegisterClassW(&wc)) {
+                WNDCLASSW existing = {};
+                if (!GetClassInfoW(module, window_class(), &existing) ||
+                     existing.lpfnWndProc != &PresetBrowser::proc)
+                    return false;
+            }
+            state.module = module;
+        }
+        ++state.users;
+        window_module_ = module;
+        class_acquired_ = true;
+        return true;
+    }
+    void release_window_class() {
+        if (!class_acquired_) return;
+        ClassRegistry& state = registry();
+        std::lock_guard<std::mutex> guard(state.lock);
+        if (--state.users == 0) {
+            UnregisterClassW(window_class(), state.module);
+            state.module = nullptr;
+        }
+        window_module_ = nullptr;
+        class_acquired_ = false;
+    }
+    HINSTANCE window_module_ = nullptr;
+    bool class_acquired_ = false;
     enum : int {
         id_type = 3101, id_bank, id_search, id_list, id_favorite,
         id_only_favorites, id_import, id_close, id_status, id_library

@@ -292,7 +292,22 @@ public:
     uint32 PLUGIN_API addRef() override { return ++refs; }
     uint32 PLUGIN_API release() override { uint32 n = --refs; trace("editor %p release -> %u", this, n); if (!n) delete this; return n; }
     tresult PLUGIN_API isPlatformTypeSupported(FIDString type) override { return !strcmp(type, kPlatformTypeHWND) ? kResultTrue : kResultFalse; }
-    tresult PLUGIN_API attached(void* parent, FIDString) override { trace("editor %p attached parent %p", this, parent); return view.attach(parent) ? kResultOk : kResultFalse; }
+    tresult PLUGIN_API attached(void* parent, FIDString) override {
+        trace("editor %p attached parent %p", this, parent);
+        if (!view.attach(parent)) return kResultFalse;
+        // Studio One may restore an old parent height without calling onSize.
+        // Do not size our art from that stale parent rectangle: use the actual
+        // VST3 editor dimensions and ask the host to synchronize its frame.
+        view.resize(size.getWidth(), size.getHeight());
+        RECT parent_size = {};
+        GetClientRect((HWND)parent, &parent_size);
+        if (frame && (parent_size.right != size.getWidth() ||
+                      parent_size.bottom != size.getHeight())) {
+            ViewRect desired = size;
+            frame->resizeView(this, &desired);
+        }
+        return kResultOk;
+    }
     tresult PLUGIN_API removed() override { trace("editor %p removed", this); view.detach(); return kResultOk; }
     tresult PLUGIN_API onWheel(float) override { return kResultFalse; }
     tresult PLUGIN_API onKeyDown(char16, int16, int16) override { return kResultFalse; }
@@ -300,9 +315,19 @@ public:
     tresult PLUGIN_API getSize(ViewRect* r) override { if (!r) return kInvalidArgument; *r = size; return kResultOk; }
     tresult PLUGIN_API onSize(ViewRect* r) override {
         if (!r) return kInvalidArgument;
-        size = *r;
-        view.resize(r->getWidth(), r->getHeight());
-        save_editor_width(r->getWidth());
+        // Preserve the panel's aspect when a DAW supplies a stale editor height.
+        const int width = std::max(min_editor_width, r->getWidth());
+        const int height = (int)std::lround(width / view.aspect());
+        const bool mismatch = width != r->getWidth() || height != r->getHeight();
+        size = ViewRect{r->left, r->top, r->left + width, r->top + height};
+        view.resize(width, height);
+        save_editor_width(width);
+        if (mismatch && frame && !correcting_host_size) {
+            correcting_host_size = true;
+            ViewRect corrected = size;
+            frame->resizeView(this, &corrected);
+            correcting_host_size = false;
+        }
         return kResultOk;
     }
     tresult PLUGIN_API onFocus(TBool) override { return kResultOk; }
@@ -328,6 +353,7 @@ private:
     PanelView view;
     ViewRect size{0, 0, 1500, 400};
     IPlugFrame* frame = nullptr;
+    bool correcting_host_size = false;
 };
 
 class Facet final : public IEditController {
