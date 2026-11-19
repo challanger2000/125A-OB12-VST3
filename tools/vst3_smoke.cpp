@@ -805,6 +805,147 @@ int main(int, char** argv) {
                     ok?"PASS":"FAIL",ticks,(int)before,(int)marker,(int)after_on,(int)after_off);
         return ok;
     }();
+
+    // Separate native VST3 sample-offset stress: verify that NoteOn and
+    // its matching NoteOff are not collapsed at small host block sizes
+    // or when switching among 44.1/48/96k host rates. This is the same
+    // original firmware-linked VST3 DLL, not a mocked queue-only test.
+    const bool small_block_ok = [&]() -> bool {
+        struct Case {
+            int host_rate, block, pitch, offset_on, offset_off;
+            bool on_seen=false, off_seen=false, finite=true;
+            unsigned long long on_target=0, on_actual=0, off_target=0, off_actual=0;
+            double p99_us=0, max_us=0, rms=0;
+            int deadline_misses=0;
+        };
+        std::vector<Case> cases;
+        cases.reserve(9);
+        bool calls_ok=true;
+        LARGE_INTEGER perf_freq{};
+        QueryPerformanceFrequency(&perf_freq);
+        for (int host_rate : {44100,48000,96000}) {
+            for (int block_size : {64,128,256}) {
+                Case c{};
+                c.host_rate=host_rate;
+                c.block=block_size;
+                c.pitch=36+(int)cases.size();
+                c.offset_on=3;
+                c.offset_off=block_size-2;
+                calls_ok = calls_ok && audio->setProcessing(false)==kResultOk &&
+                    component->setActive(false)==kResultOk;
+                ProcessSetup current{kRealtime,kSample32,512,(double)host_rate};
+                calls_ok = calls_ok && audio->setupProcessing(current)==kResultOk &&
+                    component->setActive(true)==kResultOk &&
+                    audio->setProcessing(true)==kResultOk;
+                if (!calls_ok) break;
+                const int expected_pdc=(int)std::llround(2784.0*host_rate/48000.0);
+                if ((int)audio->getLatencySamples()!=expected_pdc) calls_ok=false;
+                data.numSamples=block_size;
+                events.list.clear(); changes.list.clear();
+                Event on{};
+                on.type=Event::kNoteOnEvent;
+                on.sampleOffset=c.offset_on;
+                on.noteOn.pitch=c.pitch;
+                on.noteOn.channel=0;
+                on.noteOn.velocity=0.85f;
+                Event off{};
+                off.type=Event::kNoteOffEvent;
+                off.sampleOffset=c.offset_off;
+                off.noteOff.pitch=c.pitch;
+                off.noteOff.channel=0;
+                off.noteOff.velocity=0;
+                events.list.push_back(on);
+                events.list.push_back(off);
+                std::vector<double> durations;
+                durations.reserve(160);
+                double energy=0;
+                int64_t finite_count=0;
+                const double deadline_us=1e6*double(block_size)/host_rate;
+                for (int n=0;n<150 && calls_ok;++n) {
+                    LARGE_INTEGER started{},finished{};
+                    QueryPerformanceCounter(&started);
+                    calls_ok=audio->process(data)==kResultOk;
+                    QueryPerformanceCounter(&finished);
+                    const double us=1e6*double(finished.QuadPart-started.QuadPart)/
+                        double(perf_freq.QuadPart);
+                    durations.push_back(us);
+                    if (us > deadline_us) ++c.deadline_misses;
+                    for (int frame=0;frame<block_size;++frame) {
+                        if (!std::isfinite(l[frame])||!std::isfinite(r[frame])) {
+                            c.finite=false;
+                        } else {
+                            energy+=double(l[frame])*l[frame]+double(r[frame])*r[frame];
+                            finite_count+=2;
+                        }
+                    }
+                    events.list.clear();
+                    const DWORD pacing_ms=(DWORD)std::max(1,
+                        (int)std::ceil(1000.0*block_size/host_rate));
+                    Sleep(pacing_ms);
+                }
+                if (!durations.empty()) {
+                    std::sort(durations.begin(),durations.end());
+                    c.p99_us=durations[(size_t)(0.99*(durations.size()-1))];
+                    c.max_us=durations.back();
+                }
+                c.rms=finite_count>0 ? std::sqrt(energy/finite_count) : -1;
+                cases.push_back(c);
+            }
+            if (!calls_ok) break;
+        }
+        // The worker may be finishing the last 240-frame chunk; every host
+        // process call above was paced and flushed after an entire buffer.
+        Sleep(8);
+        std::ifstream dispatch(probe_path);
+        std::string line;
+        while (std::getline(dispatch,line)) {
+            unsigned long long target=0,actual=0;
+            unsigned status=0,pitch=0;
+            if (std::sscanf(line.c_str(),
+                    "P007_DISPATCH target=%llu actual=%llu status=%u pitch=%u",
+                    &target,&actual,&status,&pitch)!=4)
+                continue;
+            for (Case& c:cases) if (pitch==(unsigned)c.pitch) {
+                if (status==0x90 && !c.on_seen) {
+                    c.on_seen=true;c.on_target=target;c.on_actual=actual;
+                }
+                if (status==0x80 && !c.off_seen) {
+                    c.off_seen=true;c.off_target=target;c.off_actual=actual;
+                }
+            }
+        }
+        bool valid=calls_ok && cases.size()==9;
+        for (const Case& c:cases) {
+            const long long expected=
+                std::llround(double(c.offset_off)*48000.0/c.host_rate)-
+                std::llround(double(c.offset_on)*48000.0/c.host_rate);
+            const long long measured=c.on_seen&&c.off_seen ?
+                (long long)(c.off_actual-c.on_actual) : -1;
+            const bool case_ok=c.finite && c.on_seen && c.off_seen &&
+                c.on_actual==c.on_target && c.off_actual==c.off_target &&
+                measured==expected;
+            std::printf("P007_SMALL_BLOCK_CASE=%s rate=%d block=%d "
+                "on=%d off=%d native_delta=%lld expected=%lld "
+                "pcm_rms=%.8f p99_us=%.2f max_us=%.2f misses=%d\n",
+                case_ok?"PASS":"FAIL",c.host_rate,c.block,c.on_seen,c.off_seen,
+                measured,expected,c.rms,c.p99_us,c.max_us,c.deadline_misses);
+            valid = valid && case_ok;
+        }
+        // Return the fixture to the previously established 44.1-kHz/512
+        // processing contract before the normal instance teardown.
+        calls_ok = audio->setProcessing(false)==kResultOk &&
+            component->setActive(false)==kResultOk && calls_ok;
+        ProcessSetup old{kRealtime,kSample32,512,44100};
+        calls_ok = audio->setupProcessing(old)==kResultOk &&
+            component->setActive(true)==kResultOk &&
+            audio->setProcessing(true)==kResultOk && calls_ok;
+        data.numSamples=512;
+        events.list.clear(); changes.list.clear();
+        valid = valid && calls_ok;
+        std::printf("P007_SMALL_BLOCK_9X_NATIVE_OFFSET_SWEEP=%s cases=%zu\n",
+                    valid?"PASS":"FAIL",cases.size());
+        return valid;
+    }();
     audio->setProcessing(false);
     component->setActive(false);
     component->terminate();
@@ -813,5 +954,5 @@ int main(int, char** argv) {
     SetEnvironmentVariableA("OB12_MIDI_PROBE", nullptr);
     const bool reload_ok = test_second_plugin_instance(argv[1]);
     return audio_ok && preselect_browser_ok && state_ok && browser_ok &&
-           deferred_frame_ok && midi_bridge_ok && timing_ok && latency_ok && recovery_ok && reload_ok ? 0 : 2;
+           deferred_frame_ok && midi_bridge_ok && timing_ok && latency_ok && recovery_ok && small_block_ok && reload_ok ? 0 : 2;
 }
