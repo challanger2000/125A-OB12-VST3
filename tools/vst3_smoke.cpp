@@ -463,6 +463,13 @@ int main(int, char** argv) {
     long frames = 0, zero_blocks = 0, blocks = 0;
     bool sent = false;
     int64_t audio_frame_cursor = 0;
+    // Host-side measurement: wall time spent inside each actual VST3 callback.
+    // The Windows runner is not an ASIO device; record this as diagnostics,
+    // not as a real-driver no-dropout certification.
+    std::vector<double> audio_callback_us;
+    audio_callback_us.reserve(2048);
+    const double block_period_us = 1e6 * 512.0 / 44100.0;
+    int over_budget_callbacks = 0;
     int64_t note_requested_frame = -1;
     int64_t note_first_pcm_frame = -1;
     while (next < 17) {
@@ -481,7 +488,18 @@ int main(int, char** argv) {
             note_requested_frame = audio_frame_cursor;
             sent = true;
         }
-        audio->process(data);
+        LARGE_INTEGER callback_begin{}, callback_end{};
+        QueryPerformanceCounter(&callback_begin);
+        const tresult processed = audio->process(data);
+        QueryPerformanceCounter(&callback_end);
+        const double callback_us = 1e6 *
+            double(callback_end.QuadPart - callback_begin.QuadPart) / freq.QuadPart;
+        audio_callback_us.push_back(callback_us);
+        if (callback_us > block_period_us) ++over_budget_callbacks;
+        if (processed != kResultOk) {
+            std::printf("P007_CALLBACK_HOST_RETURN=FAIL code=%d\n",(int)processed);
+            return 2;
+        }
         if (sent && note_first_pcm_frame < 0) {
             for (int i=0; i<data.numSamples; ++i) {
                 // First meaningful PCM frame from the real firmware/audio
@@ -516,6 +534,17 @@ int main(int, char** argv) {
     }
     const bool audio_ok = first_sound > 10.0 && first_sound < 17.0 && frames > 0 && sum / frames > 1e-9;
     printf("AUDIO_TEST=%s\n", audio_ok ? "PASS" : "FAIL");
+    std::sort(audio_callback_us.begin(), audio_callback_us.end());
+    const auto percentile_us=[&](double p) -> double {
+        if (audio_callback_us.empty()) return -1;
+        const size_t at=std::min(audio_callback_us.size()-1,
+            (size_t)std::floor(p * (audio_callback_us.size()-1)));
+        return audio_callback_us[at];
+    };
+    std::printf("P007_CALLBACK_512_44100_MEASURED blocks=%zu p95_us=%.1f "
+                "p99_us=%.1f max_us=%.1f deadline_us=%.1f misses=%d\n",
+                audio_callback_us.size(), percentile_us(0.95), percentile_us(0.99),
+                percentile_us(1.0), block_period_us, over_budget_callbacks);
     const int64_t pcm_onset_delta = note_first_pcm_frame >= 0 && note_requested_frame >= 0
         ? note_first_pcm_frame - note_requested_frame : -1;
     // Diagnostic for the ACTUAL stereo waveform. The reported scheduler PDC
@@ -559,15 +588,28 @@ int main(int, char** argv) {
         return late_samples ? std::sqrt(late_energy/late_samples) : -1;
     };
     const double held_rms=std::sqrt(sum/frames); // left channel, 13..17s held reference
+    // Essential adversarial counterfactual: no MIDI is sent; the same Pad
+    // must still be sounding or its natural decay could masquerade as panic.
+    const double continued_held_rms=release_pcm(false,false);
     const double panic_tail_rms=release_pcm(true,false);
     const double noteoff_tail_rms=release_pcm(false,true);
     const bool release_probe_valid=audio_ok && held_rms>1e-4 &&
-        panic_tail_rms>=0 && noteoff_tail_rms>=0;
-    const bool panic_quiet=release_probe_valid && panic_tail_rms<held_rms*0.1;
-    std::printf("P007_PANIC_PCM_MEASURED=%s held_L_rms=%.8f panic_LR_late_rms=%.8f "
-                "noteoff_LR_late_rms=%.8f panic_below_-20dB=%d\n",
+        continued_held_rms>=0 && panic_tail_rms>=0 && noteoff_tail_rms>=0;
+    const bool sustained_control=release_probe_valid &&
+        continued_held_rms>=0.3*held_rms;
+    const bool panic_quiet=sustained_control && panic_tail_rms<continued_held_rms*0.1;
+    const double panic_reduction_db=continued_held_rms>1e-8 && panic_tail_rms>=0
+        ? 20.0 * std::log10(std::max(panic_tail_rms,1e-12) / continued_held_rms) : 0.0;
+    std::printf("P007_PANIC_PCM_COUNTERFACTUAL=%s held_L_rms=%.8f "
+                "untouched_held_LR_rms=%.8f panic_LR_late_rms=%.8f "
+                "noteoff_LR_late_rms=%.8f panic_delta_db=%.2f "
+                "sustained_control=%d panic_below_-20dB=%d\n",
                 release_probe_valid?"MEASURED":"NOT_VALID",
-                held_rms,panic_tail_rms,noteoff_tail_rms,(int)panic_quiet);
+                held_rms,continued_held_rms,panic_tail_rms,noteoff_tail_rms,
+                panic_reduction_db,(int)sustained_control,(int)panic_quiet);
+    // Do not certify acoustic panic unless the ORIGINAL FIRMWARE's Pad
+    // survived the matching no-command baseline and then became quieter.
+    // Keep this diagnostic separate from the host-load/protocol gates.
 
     // First choose Timbre B-007 through the actual browser while the machine
     // is fully booted. Then ensure the exact selection is serialized/recalled.
