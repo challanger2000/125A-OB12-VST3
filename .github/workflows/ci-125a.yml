@@ -165,35 +165,78 @@ jobs:
           if errorlevel 1 exit /b 1
           build\audit_p007_adversarial.exe build\OB12.vst3\Contents\x86_64-win\rom
           if errorlevel 1 exit /b 1
-      - name: Package 125A Windows VST3 patch without original ROM files
+      - name: Package complete 125A Windows VST3 with original personal-use firmware and presets
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force -Path 'build/125A-OB12-VST3' | Out-Null
-          Copy-Item 'build/OB12.vst3/Contents/x86_64-win/OB12.vst3' 'build/125A-OB12-VST3/OB12.vst3'
+          $root = 'build/125A-OB12-VST3-FULL'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          Copy-Item -LiteralPath 'build/OB12.vst3' -Destination "$root/OB12.vst3" -Recurse -Force
+          $bundle = "$root/OB12.vst3/Contents/x86_64-win"
+          $rom = "$bundle/rom"
+          foreach ($required in @(
+            "$bundle/OB12.vst3",
+            "$rom/12cpu152-CPU-v1.52-FINAL.bin",
+            "$rom/12dsp111-DSP-v1.11-FINAL.bin",
+            "$rom/presets/12prgFS.bin",
+            "$rom/presets/12tmbFS.bin"
+          )) {
+            if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+              throw "Required full-install file missing: $required"
+            }
+          }
+          $dsp = @(Get-ChildItem "$rom/dsp" -File -ErrorAction Stop)
+          if ($dsp.Count -lt 1) { throw "DSP program directory is empty" }
+          $files = @(Get-ChildItem "$bundle" -Recurse -File)
+          if ($files.Count -lt 10) {
+            throw "Full package unexpectedly sparse: $($files.Count) files"
+          }
+          Write-Host "P007_FULL_PACKAGE=PASS files=$($files.Count) dsp_programs=$($dsp.Count)"
+          Write-Host "P007_FULL_PACKAGE_BANKS:"
+          Get-ChildItem "$rom/presets" -File | Select-Object -ExpandProperty Name | Sort-Object
+          Copy-Item LICENSE "$root/LICENSE-GPL-3.0.txt" -Force
           @'
-          125A OB-12 VST3 — development build for personal evaluation
+          125A OB-12 VST3 — Complete Windows x64 installation for personal use
+          Tested code: 71da5b0dd4fce7c66fe5e140b4828ae82f721ce9
+          Original synthesizer firmware/data copyright Viscount International.
+          Firmware comes from the upstream Tuth/ob12-emu v0.10.0 release for
+          personal/archival use. No commercial redistribution authorized here.
+          The emulator code derives from Tuth/ob12-emu under GPL-3.0.
 
-          1. Obtain the original upstream bundle:
-             https://github.com/Tuth/ob12-emu/releases/tag/v0.10.0
-          2. Keep the original OB12.vst3 folder with its rom subfolder.
-          3. Overwrite OB12.vst3\Contents\x86_64-win\OB12.vst3
-             with the enclosed 125A file.
-          4. Copy the whole OB12.vst3 folder to the Windows VST3 directory
-             (normally C:\Program Files\Common Files\VST3\).
-          5. Rescan the plugin list in Studio One.
-          6. Right-click the original blue hardware panel and choose
-             "Preset Browser..." to open the added browser.
+          INSTALLATION:
+          1. Close Studio One.
+          2. Back up your existing OB12.vst3 folder if installed.
+          3. Extract the enclosed OB12.vst3 folder as one directory to:
+             C:\Program Files\Common Files\VST3\OB12.vst3
+          4. Keep Contents\x86_64-win\rom and all its contents intact.
+          5. Start Studio One, rescan plugins, load 125A OB-12 VST3.
+          6. Right-click the original blue OB-12 panel to access Preset Browser.
 
-          Important: This patch includes no proprietary firmware/ROM.
-          The 125A browser and project-recall functionality is still in
-          development. Do not overwrite a working installation without
-          keeping a backup.
-          '@ | Set-Content 'build/125A-OB12-VST3/INSTALL-125A.txt' -Encoding utf8
-      - name: Publish firmware-free tested DLL patch artifact
+          Included: tested 125A OB12.vst3 binary, original CPU/DSP firmware,
+          original factory program/timbre resources, DSP programs, licensing.
+          Additional third-party/user banks depend on their actual availability
+          in the upstream original release. Do not assume they are bundled.
+          Studio One practical acceptance remains unverified.
+
+          Source code: https://github.com/challanger2000/125A-OB12-VST3
+          Base project: https://github.com/Tuth/ob12-emu
+          '@ | Set-Content "$root/INSTALL-125A.txt" -Encoding utf8
+          @'
+          125A modified VST3 plugin source:
+          https://github.com/challanger2000/125A-OB12-VST3/tree/71da5b0dd4fce7c66fe5e140b4828ae82f721ce9
+
+          Upstream original:
+          https://github.com/Tuth/ob12-emu/tree/v0.10.0
+
+          Build and original firmware verification:
+          https://github.com/challanger2000/125A-OB12-VST3/actions/runs/44452636537
+          '@ | Set-Content "$root/SOURCE-AND-BUILD.txt" -Encoding utf8
+          $all = @(Get-ChildItem $root -Recurse -File)
+          Write-Host "P007_FULL_INSTALL_READY=PASS bundle_files=$($all.Count) total_bytes=$(($all | Measure-Object Length -Sum).Sum)"
+      - name: Publish complete Windows VST3 for personal evaluation
         uses: actions/upload-artifact@v4
         with:
-          name: 125A-OB12-VST3-patch-win64
-          path: build/125A-OB12-VST3/*
+          name: 125A-OB12-VST3-FULL-win64
+          path: build/125A-OB12-VST3-FULL/*
           retention-days: 14
           if-no-files-found: error
