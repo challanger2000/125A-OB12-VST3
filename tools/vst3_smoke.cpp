@@ -61,11 +61,19 @@ struct MemoryState final : IBStream {
 
 struct Events final : IEventList {
     std::vector<Event> list;
+    int32 virtual_count=-1;
+    int32 accessed=0;
     tresult PLUGIN_API queryInterface(const TUID, void** obj) override { *obj = nullptr; return kNoInterface; }
     uint32 PLUGIN_API addRef() override { return 1; }
     uint32 PLUGIN_API release() override { return 1; }
-    int32 PLUGIN_API getEventCount() override { return (int32)list.size(); }
-    tresult PLUGIN_API getEvent(int32 i, Event& e) override { e = list[i]; return kResultOk; }
+    int32 PLUGIN_API getEventCount() override {
+        return virtual_count>=0 ? virtual_count : (int32)list.size();
+    }
+    tresult PLUGIN_API getEvent(int32 i, Event& e) override {
+        ++accessed;
+        if (i<0 || (size_t)i>=list.size()) return kInvalidArgument;
+        e=list[(size_t)i];return kResultOk;
+    }
     tresult PLUGIN_API addEvent(Event& e) override { list.push_back(e); return kResultOk; }
 };
 
@@ -74,21 +82,36 @@ struct Queue final : IParamValueQueue {
     ParamID id = 0;
     ParamValue value = 0;
     int32 sample_offset = 0;
+    int32 virtual_point_count=-1;
+    int32 point_reads=0;
     tresult PLUGIN_API queryInterface(const TUID, void** obj) override { *obj = nullptr; return kNoInterface; }
     uint32 PLUGIN_API addRef() override { return 1; }
     uint32 PLUGIN_API release() override { return 1; }
     ParamID PLUGIN_API getParameterId() override { return id; }
-    int32 PLUGIN_API getPointCount() override { return 1; }
-    tresult PLUGIN_API getPoint(int32, int32& offset, ParamValue& v) override { offset = sample_offset; v = value; return kResultOk; }
+    int32 PLUGIN_API getPointCount() override {
+        return virtual_point_count>=0 ? virtual_point_count : 1;
+    }
+    tresult PLUGIN_API getPoint(int32 i, int32& offset, ParamValue& v) override {
+        ++point_reads;
+        if (i!=0) return kInvalidArgument;
+        offset=sample_offset;v=value;return kResultOk;
+    }
     tresult PLUGIN_API addPoint(int32, ParamValue, int32&) override { return kResultFalse; }
 };
 struct Changes final : IParameterChanges {
     std::vector<Queue> list;
+    int32 virtual_count=-1;
+    int32 accessed=0;
     tresult PLUGIN_API queryInterface(const TUID, void** obj) override { *obj = nullptr; return kNoInterface; }
     uint32 PLUGIN_API addRef() override { return 1; }
     uint32 PLUGIN_API release() override { return 1; }
-    int32 PLUGIN_API getParameterCount() override { return (int32)list.size(); }
-    IParamValueQueue* PLUGIN_API getParameterData(int32 i) override { return &list[i]; }
+    int32 PLUGIN_API getParameterCount() override {
+        return virtual_count>=0 ? virtual_count : (int32)list.size();
+    }
+    IParamValueQueue* PLUGIN_API getParameterData(int32 i) override {
+        ++accessed;
+        return i>=0 && (size_t)i<list.size() ? &list[(size_t)i] : nullptr;
+    }
     IParamValueQueue* PLUGIN_API addParameterData(const ParamID&, int32&) override { return nullptr; }
 };
 
@@ -1173,6 +1196,55 @@ int main(int, char** argv) {
                     valid?"PASS":"FAIL",cases.size());
         return valid;
     }();
+
+    // Adversarial host iterator budget: the VST3 callback must finish even
+    // if a malicious/buggy IEventList / IParameterChanges reports INT_MAX
+    // events. The returned pointers are a real host fixture, while the
+    // reported counts are intentionally absurd. Previous implementation
+    // walked the entire counts even when its 2,048-message list was full.
+    const bool midi_unbounded_host_count_ok=[&]() -> bool {
+        LARGE_INTEGER freq{},started{},finished{};
+        QueryPerformanceFrequency(&freq);
+        auto invoke=[&]() -> double {
+            QueryPerformanceCounter(&started);
+            const bool processed=audio->process(data)==kResultOk;
+            QueryPerformanceCounter(&finished);
+            return processed ?
+                1e6*double(finished.QuadPart-started.QuadPart)/freq.QuadPart : -1;
+        };
+        events.list.clear();changes.list.clear();
+        Event first{};
+        first.type=Event::kNoteOffEvent;
+        first.noteOff.pitch=52;first.noteOff.channel=0;
+        events.list.push_back(first);
+        events.virtual_count=2147483647;
+        events.accessed=0;
+        const double raw_us=invoke();
+        const int raw_reads=events.accessed;
+        events.virtual_count=-1;
+        events.list.clear();
+        changes.list.clear();
+        Queue point{};
+        point.id=7;point.value=0.75;point.virtual_point_count=2147483647;
+        changes.list.push_back(point);
+        changes.virtual_count=2147483647;
+        changes.accessed=0;
+        const double mapped_us=invoke();
+        const int queues_queried=changes.accessed;
+        const int points_queried=changes.list[0].point_reads;
+        changes.virtual_count=-1;
+        changes.list.clear();
+        const bool ok=raw_us>=0 && mapped_us>=0 &&
+            raw_reads>0 && raw_reads<=2048 &&
+            queues_queried>0 && queues_queried<=2048 &&
+            points_queried>0 && points_queried<=2048;
+        std::printf("P007_HOST_REPORTED_INT_MAX_BOUNDS=%s raw_reads=%d "
+            "queues_queried=%d points_queried=%d "
+            "raw_callback_us=%.1f mapped_callback_us=%.1f\n",
+            ok?"PASS":"FAIL",raw_reads,queues_queried,
+            points_queried,raw_us,mapped_us);
+        return ok;
+    }();
     audio->setProcessing(false);
     component->setActive(false);
     component->terminate();
@@ -1183,5 +1255,5 @@ int main(int, char** argv) {
     return audio_ok && preselect_browser_ok && state_ok && browser_ok &&
            deferred_frame_ok && firmware_ready && midi_bridge_ok && midi_mixed_raw_mapped_ok &&
            midi_controller_frame_identity_ok && timing_ok && latency_ok && recovery_ok &&
-           small_block_ok && reload_ok ? 0 : 2;
+           small_block_ok && midi_unbounded_host_count_ok && reload_ok ? 0 : 2;
 }

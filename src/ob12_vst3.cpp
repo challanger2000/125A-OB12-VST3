@@ -659,7 +659,11 @@ public:
                 uint16_t count = 3;
                 const uint8_t* raw = nullptr;
             };
-            std::array<Message,2048> list{};
+            // Never walk an unbounded host-supplied event/parameter count on
+            // the realtime callback. The bounded scratch queue was already
+            // capped, but enumeration could still loop billions of times.
+            constexpr int32 max_host_items = 2048;
+            std::array<Message,max_host_items> list{};
             int used = 0, order = 0;
             // Exact-frame raw/mapped collision keys: (controller ID, VST3 sample
             // offset). Never remove a distinct automation point merely because
@@ -683,7 +687,12 @@ public:
                 } else list[used++] = message;
             };
             if (data.inputEvents) {
-                const int32 count = data.inputEvents->getEventCount();
+                const int32 reported = data.inputEvents->getEventCount();
+                if (reported < 0 || reported > max_host_items) {
+                    inst->midi_queue_drops.fetch_add(1, std::memory_order_relaxed);
+                    malformed_or_saturated = true;
+                }
+                const int32 count = std::clamp<int32>(reported,0,max_host_items);
                 for (int32 i = 0; i < count; ++i) {
                     Event e{};
                     if (data.inputEvents->getEvent(i, e) != kResultOk) continue;
@@ -742,12 +751,32 @@ public:
                       raw_controller_keys.begin()+raw_controller_count);
             // A raw Program Change is NOT a mirrored mapped CC.
             IParameterChanges* changes = data.inputParameterChanges;
-            if (changes) for (int32 i=0; i<changes->getParameterCount(); ++i) {
-                IParamValueQueue* queue = changes->getParameterData(i);
-                if (!queue) continue;
-                const ParamID id = queue->getParameterId();
-                if (id >= (ParamID)midi_params) continue;
-                for (int32 p=0; p<queue->getPointCount(); ++p) {
+            if (changes) {
+                const int32 reported = changes->getParameterCount();
+                if (reported < 0 || reported > max_host_items) {
+                    inst->midi_queue_drops.fetch_add(1, std::memory_order_relaxed);
+                    malformed_or_saturated = true;
+                }
+                const int32 count = std::clamp<int32>(reported,0,max_host_items);
+                int32 remaining_points = max_host_items;
+                for (int32 i=0; i<count; ++i) {
+                    if (remaining_points <= 0) {
+                        inst->midi_queue_drops.fetch_add(1, std::memory_order_relaxed);
+                        malformed_or_saturated = true;
+                        break;
+                    }
+                    IParamValueQueue* queue = changes->getParameterData(i);
+                    if (!queue) continue;
+                    const ParamID id = queue->getParameterId();
+                    if (id >= (ParamID)midi_params) continue;
+                    const int32 offered = queue->getPointCount();
+                    if (offered < 0 || offered > remaining_points) {
+                        inst->midi_queue_drops.fetch_add(1, std::memory_order_relaxed);
+                        malformed_or_saturated = true;
+                    }
+                    const int32 inspect = std::clamp<int32>(offered,0,remaining_points);
+                    remaining_points -= inspect;
+                    for (int32 p=0; p<inspect; ++p) {
                     int32 offset=0;
                     ParamValue v=0;
                     if (queue->getPoint(p,offset,v)!=kResultOk) continue;
@@ -772,6 +801,7 @@ public:
                         m.bytes[2]=(uint8_t)std::clamp((int)std::lround(v*127),0,127);
                     }
                     add(m);
+                    }
                 }
             }
             std::sort(list.begin(), list.begin()+used, [](const Message& a,const Message& b) {
