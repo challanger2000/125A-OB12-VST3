@@ -104,8 +104,35 @@ static bool audit_panel_art(const std::string& rom, Engine& e) {
     return true;
 }
 
+static bool audit_preset_owner(const std::string& rom) {
+    const uint8_t host_program[] = {
+        0xb0, 0x00, 0x40, 0xb0, 0x20, 0x00, 0xc0, 0x07
+    };
+    Engine host_first(rom);
+    host_first.observe_host_midi(host_program, (int)sizeof host_program);
+    const int before = host_first.selected_preset();
+    const bool old_restore_rejected = !host_first.select_saved_preset_if_unset(134);
+    const int after = host_first.selected_preset();
+    const bool host_wins = old_restore_rejected && before == 263 && after == 263;
+    std::printf("AUDIT_PRESET_HOST_BEFORE_DELAYED_RESTORE=%s before=%d after=%d\\n",
+                host_wins?"PASS":"FAIL",before,after);
+    if (!host_wins) return false;
+
+    Engine saved_first(rom);
+    const bool saved = saved_first.select_saved_preset_if_unset(134);
+    const int selected = saved_first.selected_preset();
+    const bool not_twice = !saved_first.select_saved_preset_if_unset(134);
+    saved_first.observe_host_midi(host_program, (int)sizeof host_program);
+    const int final = saved_first.selected_preset();
+    const bool next_host_wins = saved && selected == 134 && not_twice && final == 263;
+    std::printf("AUDIT_PRESET_SAVED_THEN_LIVE_MIDI=%s saved=%d final=%d\\n",
+                next_host_wins?"PASS":"FAIL",selected,final);
+    return next_host_wins;
+}
+
 int main(int argc, char** argv) {
     if (argc != 2) { std::puts("usage: audit_p007_adversarial <rom>"); return 2; }
+    if (!audit_preset_owner(argv[1])) return 18;
     Engine e{std::string(argv[1])};
     e.detach_flash_file();
     std::vector<uint8_t> baseline;

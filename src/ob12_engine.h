@@ -19,6 +19,8 @@ public:
     void midi_deferred(const uint8_t* bytes, int count); // feeder thread only; not realtime safe
     void select_preset(bool program, int bank, int slot);  // MIDI bank select and program change; bank 0/1, slot 0..127
     int selected_preset() const;  // last observed MIDI Program Change (0..511), -1 if unknown
+    // Worker-side one-time project recall cannot overwrite a newer host MIDI Program Change.
+    bool select_saved_preset_if_unset(int preset);
     void debug_lcd_report() const; // diagnostic: print original firmware LCD text to console
 
     // The Master's flash (29F800, 1 MB) is the unit's only memory that survives switching off:

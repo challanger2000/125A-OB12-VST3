@@ -135,7 +135,9 @@ struct Instrument {
                                       read.load(std::memory_order_acquire);
                 const bool ready = engine->sounding_ready();
                 if (ready && !preset_restored && preset >= 0 && preset < 512) {
-                    engine->select_preset(preset >= 256, (preset % 256) / 128, preset % 128);
+                    // Saved project recall is subordinate to a newer MIDI Program
+                    // Change, including when it arrived while firmware booted.
+                    engine->select_saved_preset_if_unset(preset);
                     preset_restored = true;
                 }
                 if (ready && fill >= (uint64_t)lead_frames) { Sleep(1); continue; }

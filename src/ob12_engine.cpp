@@ -975,6 +975,28 @@ void Engine::run(int32_t* frames, int n) {
     while (e.made < n) e.next_batch();
 }
 
+bool Engine::select_saved_preset_if_unset(int preset) {
+    if (preset < 0 || preset >= 512) return false;
+    // The freshly constructed/reloaded Engine starts with selected_program=-1.
+    // Host Program Change atomically replaces that mirror in process(), before
+    // MIDI reaches the firmware. A single CAS prevents delayed boot recall
+    // from overwriting a newer host Program Change even at ready-time races.
+    int expected = -1;
+    if (!impl->selected_program.compare_exchange_strong(expected, preset,
+            std::memory_order_acq_rel, std::memory_order_acquire))
+        return false;
+    const uint8_t bytes[] = {
+        0xb0, 0x00, (uint8_t)(preset >= 256 ? 64 : 0),
+        0xb0, 0x20, (uint8_t)((preset % 256) >= 128 ? 64 : 0),
+        0xc0, (uint8_t)(preset % 128)
+    };
+    // Enqueue on NON-realtime feeder. Do NOT call midi() here: its
+    // observe_host_midi() would store the older preset a second time
+    // after a possible intervening live host event.
+    midi_deferred(bytes, (int)sizeof bytes);
+    return true;
+}
+
 void Engine::select_preset(bool program, int bank, int slot) {
     if (bank < 0 || bank > 1 || slot < 0 || slot >= 128) return;
     // Original OB-12 bank select: MSB 64..127 = Programs, 0..63 = Timbres;
