@@ -1455,6 +1455,72 @@ int main(int, char** argv) {
             points_queried,raw_us,mapped_us);
         return ok;
     }();
+
+    // MIDI's exact NoteOn(velocity=0) convention is NoteOff. The previous
+    // conversion enforced min velocity 1, creating a new sounding voice.
+    // The true original-firmware worker input must see a release, while
+    // a barely positive velocity must remain a legitimate quiet NoteOn.
+    const bool midi_zero_velocity_noteoff_ok=[&]() -> bool {
+        events.list.clear();changes.list.clear();
+        // A prior hostile-host fixture requests panic; first drain that
+        // recovery before the independent velocity convention fixture.
+        bool calls=true;
+        for(int i=0;i<35;++i) {
+            calls=calls&&audio->process(data)==kResultOk;Sleep(4);
+        }
+        Event zero{};
+        zero.type=Event::kNoteOnEvent;zero.sampleOffset=96;
+        zero.noteOn.pitch=123;zero.noteOn.channel=0;zero.noteOn.velocity=0.0f;
+        Event quiet_on{};
+        quiet_on.type=Event::kNoteOnEvent;quiet_on.sampleOffset=144;
+        quiet_on.noteOn.pitch=124;quiet_on.channel=0;quiet_on.noteOn.velocity=0.00001f;
+        Event off{};
+        off.type=Event::kNoteOffEvent;off.sampleOffset=320;
+        off.noteOff.pitch=124;off.noteOff.channel=0;off.noteOff.velocity=0;
+        events.list={zero,quiet_on,off};
+        calls=calls&&audio->process(data)==kResultOk;
+        events.list.clear();
+        for(int i=0;i<35;++i) {
+            calls=calls&&audio->process(data)==kResultOk;Sleep(4);
+        }
+        std::ifstream trace(probe_path);
+        std::string line;
+        bool velocity_zero_is_off=false,velocity_zero_is_on=false;
+        bool quiet_positive_is_on=false,quiet_positive_is_off=false;
+        unsigned long long frame_zero=0,frame_positive=0;
+        while(std::getline(trace,line)) {
+            unsigned long long target=0,actual=0;
+            unsigned status=0,pitch=0,value=0;
+            if(std::sscanf(line.c_str(),
+                "P007_DISPATCH target=%llu actual=%llu status=%u pitch=%u value=%u",
+                &target,&actual,&status,&pitch,&value)!=5)continue;
+            if(pitch==123) {
+                if(status==0x80 && value==0 && target==actual) {
+                    velocity_zero_is_off=true;frame_zero=actual;
+                }
+                if(status==0x90)velocity_zero_is_on=true;
+            }
+            if(pitch==124) {
+                if(status==0x90 && value==1 && target==actual) {
+                    quiet_positive_is_on=true;frame_positive=actual;
+                }
+                if(status==0x80 && target==actual)quiet_positive_is_off=true;
+            }
+        }
+        const long long expected_delta=
+            std::llround(144.0*48000.0/44100.0)-
+            std::llround(96.0*48000.0/44100.0);
+        const long long delta=frame_positive>=frame_zero ?
+            (long long)(frame_positive-frame_zero):-1;
+        const bool ok=calls&&velocity_zero_is_off&&!velocity_zero_is_on&&
+            quiet_positive_is_on&&quiet_positive_is_off&&delta==expected_delta;
+        std::printf("P007_MIDI_ZERO_VELOCITY_RELEASE=%s zero_is_off=%d "
+            "zero_is_on=%d quiet_positive_on=%d quiet_positive_off=%d "
+            "native_delta=%lld expected=%lld\n",
+            ok?"PASS":"FAIL",(int)velocity_zero_is_off,(int)velocity_zero_is_on,
+            (int)quiet_positive_is_on,(int)quiet_positive_is_off,delta,expected_delta);
+        return ok;
+    }();
     audio->setProcessing(false);
     component->setActive(false);
     component->terminate();
@@ -1467,5 +1533,5 @@ int main(int, char** argv) {
            midi_controller_frame_identity_ok && timing_ok && latency_ok && recovery_ok &&
            small_block_ok && midi_nonfinite_host_values_ok &&
            midi_raw_packet_and_offset_ok && midi_unbounded_host_count_ok &&
-           reload_ok ? 0 : 2;
+           midi_zero_velocity_noteoff_ok && reload_ok ? 0 : 2;
 }

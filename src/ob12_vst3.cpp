@@ -756,10 +756,15 @@ public:
                             malformed_or_saturated = true;
                             continue;
                         }
-                        m.bytes[0] = 0x90 | (e.noteOn.channel & 15);
+                        const float velocity = std::clamp(e.noteOn.velocity,0.0f,1.0f);
+                        // MIDI NoteOn at velocity 0 is NoteOff. Previously
+                        // max(1,round(v*127)) invented a quiet NoteOn, which
+                        // could leave a released key sounding indefinitely.
+                        m.bytes[0] = (uint8_t)((velocity==0.0f ? 0x80 : 0x90) |
+                                                (e.noteOn.channel & 15));
                         m.bytes[1] = (uint8_t)std::clamp<int>(e.noteOn.pitch, 0, 127);
-                        m.bytes[2] = (uint8_t)std::max(1, (int)std::lround(
-                            (double)std::clamp(e.noteOn.velocity,0.0f,1.0f) * 127.0));
+                        m.bytes[2] = velocity==0.0f ? 0 : (uint8_t)std::max(
+                            1, (int)std::lround((double)velocity*127.0));
                     } else if (e.type == Event::kNoteOffEvent) {
                         m.bytes[0] = 0x80 | (e.noteOff.channel & 15);
                         m.bytes[1] = (uint8_t)std::clamp<int>(e.noteOff.pitch, 0, 127);
