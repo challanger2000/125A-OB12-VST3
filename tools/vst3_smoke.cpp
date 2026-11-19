@@ -1342,6 +1342,14 @@ int main(int, char** argv) {
         calls=calls&&audio->process(data)==kResultOk;
         events.list.clear();
         const int after_bad=current();
+        // Fault recovery closes MIDI ingress until the accepted backlog is
+        // consumed and CC123/CC120 have reached the original worker.
+        // Independently drain that fence before attempting the next fixture:
+        // otherwise the valid next NoteOn is correctly rejected as overload.
+        for(int n=0;n<35;++n) {
+            calls=calls&&audio->process(data)==kResultOk;
+            Sleep(4);
+        }
         // A malformed short NoteOff and out-of-block NoteOff still need
         // safe pitch/channel releases. Both should reach the feeder and
         // trigger recovery, while a malformed NoteOn never reaches it.
