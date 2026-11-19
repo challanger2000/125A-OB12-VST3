@@ -1294,6 +1294,111 @@ int main(int, char** argv) {
             (int)invalid_note_dispatched,(int)valid_note,(int)valid_off);
         return ok;
     }();
+
+    // Malformed host MIDI must not be truncated into a different valid
+    // message (nor must out-of-range offsets be silently converted into
+    // valid NoteOn/CC automation). A short raw NoteOff is salvaged with
+    // zero velocity, and a valid subsequent note must remain playable.
+    const bool midi_raw_packet_and_offset_ok=[&]() -> bool {
+        const uint8_t cc64[]={0xb0,0,64};
+        const uint8_t cc32[]={0xb0,32,0};
+        const uint8_t prog30[]={0xc0,30};
+        const uint8_t prog31[]={0xc0,31};
+        const uint8_t truncated_prog[]={0xc0};
+        const uint8_t truncated_cc[]={0xb0,0};
+        const uint8_t bad_status[]={0x40,0,0};
+        const uint8_t status_as_data[]={0x90,119,0x80};
+        const uint8_t fragmented_off[]={0x80,118};
+        const uint8_t bad_sysex[]={0xf0,0x7d,0x01}; // no F7 terminator
+        const uint8_t clock[]={0xf8};
+        const uint8_t malformed_clock[]={0xf8,0xf8};
+        auto raw=[&](const uint8_t* bytes,uint32_t len,int offset) {
+            Event e{};e.type=Event::kDataEvent;e.sampleOffset=offset;
+            e.data.bytes=bytes;e.data.size=len;events.list.push_back(e);
+        };
+        auto current=[&]() -> int {
+            MemoryState state;
+            if (component->getState(&state)!=kResultOk ||
+                state.storage.size()!=0x100000+24)return -100;
+            int32_t selected=-100;
+            std::memcpy(&selected,state.storage.data()+20,sizeof selected);
+            return selected;
+        };
+        events.list.clear();changes.list.clear();
+        raw(cc64,3,0);raw(cc32,3,0);raw(prog30,2,128);
+        bool calls=audio->process(data)==kResultOk;
+        events.list.clear();
+        const int baseline=current();
+        // All malformed messages in the *same* host block are rejected,
+        // while genuine Program31 at the end remains valid (no phantom bank).
+        raw(truncated_prog,1,0);
+        raw(truncated_cc,2,0);
+        raw(bad_status,3,0);
+        raw(status_as_data,3,0);
+        raw(bad_sysex,3,0);
+        raw(malformed_clock,2,0);
+        raw(cc64,3,-1); // invalid raw controller offset must not be remapped to 0
+        raw(prog31,2,128);
+        calls=calls&&audio->process(data)==kResultOk;
+        events.list.clear();
+        const int after_bad=current();
+        // A malformed short NoteOff and out-of-block NoteOff still need
+        // safe pitch/channel releases. Both should reach the feeder and
+        // trigger recovery, while a malformed NoteOn never reaches it.
+        Event on{};
+        on.type=Event::kNoteOnEvent;on.sampleOffset=40;
+        on.noteOn.pitch=118;on.noteOn.velocity=0.75f;
+        Event malformed_on{};
+        malformed_on.type=Event::kNoteOnEvent;malformed_on.sampleOffset=-5;
+        malformed_on.noteOn.pitch=117;malformed_on.noteOn.velocity=0.75f;
+        Event release{};
+        release.type=Event::kNoteOffEvent;release.sampleOffset=1000000;
+        release.noteOff.pitch=118;release.noteOff.velocity=0;
+        events.list.push_back(on);
+        raw(fragmented_off,2,400);
+        events.list.push_back(release);
+        events.list.push_back(malformed_on);
+        raw(clock,1,256);
+        Queue invalid_cc{};
+        invalid_cc.id=0; invalid_cc.value=0; invalid_cc.sample_offset=-32;
+        changes.list.push_back(invalid_cc);
+        calls=calls&&audio->process(data)==kResultOk;
+        events.list.clear();changes.list.clear();
+        for(int n=0;n<55;++n){calls=calls&&audio->process(data)==kResultOk;Sleep(4);}
+        std::ifstream trace(probe_path);
+        std::string line;
+        bool on118=false,off118=false,short_repaired=false,malformed117=false;
+        bool raw_bad_data=false,prog31_delivered=false,clock_valid=false;
+        int off_count=0;
+        while(std::getline(trace,line)) {
+            unsigned long long target=0,actual=0;
+            unsigned status=0,pitch=0,value=0;
+            if(std::sscanf(line.c_str(),
+                "P007_DISPATCH target=%llu actual=%llu status=%u pitch=%u value=%u",
+                &target,&actual,&status,&pitch,&value)!=5)continue;
+            if(status==0x90 && pitch==118)on118=true;
+            if(status==0x90 && pitch==117)malformed117=true;
+            if(status==0x80 && pitch==118) {
+                off118=true;++off_count;
+                if(value==0)short_repaired=true;
+            }
+            if(status==0xc0 && pitch==31)prog31_delivered=true;
+            if(status==0xf8)clock_valid=true;
+            if((status==0xc0 && pitch==0) || status==0x40 ||
+               (status==0x90 && pitch==119))raw_bad_data=true;
+        }
+        const bool ok=calls&&baseline==286&&after_bad==287&&
+             on118&&off118&&short_repaired&&!malformed117&&
+             !raw_bad_data&&prog31_delivered&&clock_valid&&off_count>=2;
+        std::printf("P007_MALFORMED_RAW_AND_OFFSETS=%s "
+            "base=%d expected=286 after=%d expected=287 "
+            "note_on=%d note_off=%d short_off_zero=%d off_count=%d "
+            "invalid_on=%d malformed_raw_dispatched=%d program31=%d clock=%d\n",
+            ok?"PASS":"FAIL",baseline,after_bad,(int)on118,
+            (int)off118,(int)short_repaired,off_count,
+            (int)malformed117,(int)raw_bad_data,(int)prog31_delivered,(int)clock_valid);
+        return ok;
+    }();
     // Adversarial host iterator budget: the VST3 callback must finish even
     // if a malicious/buggy IEventList / IParameterChanges reports INT_MAX
     // events. The returned pointers are a real host fixture, while the
@@ -1353,5 +1458,6 @@ int main(int, char** argv) {
            deferred_frame_ok && firmware_ready && midi_bridge_ok && midi_mixed_raw_mapped_ok &&
            midi_controller_frame_identity_ok && timing_ok && latency_ok && recovery_ok &&
            small_block_ok && midi_nonfinite_host_values_ok &&
-           midi_unbounded_host_count_ok && reload_ok ? 0 : 2;
+           midi_raw_packet_and_offset_ok && midi_unbounded_host_count_ok &&
+           reload_ok ? 0 : 2;
 }

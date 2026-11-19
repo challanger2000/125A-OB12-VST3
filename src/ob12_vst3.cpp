@@ -680,6 +680,40 @@ public:
                 return (uint64_t(id) << 32) | uint64_t(at);
             };
             bool malformed_or_saturated = false;
+            // The VST host can report 2,048 * 4,096-byte raw packets. A
+            // bounded *event* count alone does not bound audio callback
+            // validation/copy work. Limit total raw bytes examined each block.
+            constexpr uint32 max_raw_bytes_per_callback = 65536;
+            uint32 raw_bytes_examined = 0;
+            auto bad_host_event = [&]() noexcept {
+                inst->midi_queue_drops.fetch_add(1, std::memory_order_relaxed);
+                malformed_or_saturated = true;
+            };
+            auto raw_packet_is_valid = [&](const uint8_t* bytes, uint32 len) noexcept -> bool {
+                if (!bytes || !len || len > 4096) return false;
+                const uint8_t status = bytes[0];
+                if (status < 0x80) return false; // never invent cross-event running status
+                if (status == 0xf0) {
+                    // Complete SysEx only. Realtime status may legally occur
+                    // inside MIDI SysEx; nested starts/channel status may not.
+                    if (len < 2 || bytes[len-1] != 0xf7) return false;
+                    for (uint32 j=1; j+1<len; ++j)
+                        if (bytes[j]>=0x80 && bytes[j]<0xf8) return false;
+                    return true;
+                }
+                uint32 expected = 0;
+                if (status < 0xf0)
+                    expected = ((status & 0xf0)==0xc0 || (status & 0xf0)==0xd0) ? 2u : 3u;
+                else if (status==0xf1 || status==0xf3) expected=2;
+                else if (status==0xf2) expected=3;
+                else if (status==0xf6 ||
+                         status==0xf8 || status==0xfa || status==0xfb ||
+                         status==0xfc || status==0xfe || status==0xff) expected=1;
+                else return false; // F4/F5/F7/F9/FD are not standalone packets
+                if (len != expected) return false; // neither truncate nor pad input
+                for (uint32 j=1;j<len;++j) if (bytes[j]>=0x80) return false;
+                return true;
+            };
             auto add = [&](const Message& message) {
                 if (used >= (int)list.size()) {
                     inst->midi_queue_drops.fetch_add(1, std::memory_order_relaxed);
@@ -697,7 +731,21 @@ public:
                     Event e{};
                     if (data.inputEvents->getEvent(i, e) != kResultOk) continue;
                     Message m{};
-                    m.offset = e.sampleOffset;
+                    const bool invalid_offset =
+                        e.sampleOffset < 0 || e.sampleOffset > data.numSamples;
+                    if (invalid_offset) {
+                        bad_host_event();
+                        // A malformed offset on NoteOff must not strand an
+                        // existing voice. Also allow raw NoteOff salvage below.
+                        const bool release = e.type == Event::kNoteOffEvent ||
+                            (e.type == Event::kDataEvent && e.data.bytes &&
+                             e.data.size>=2 &&
+                             (e.data.bytes[0] & 0xf0)==0x80 &&
+                             e.data.bytes[1]<0x80);
+                        if (!release) continue;
+                    }
+                    m.offset = std::clamp<int32>(
+                        e.sampleOffset,0,std::max<int32>(0,data.numSamples));
                     m.order = order++;
                     if (e.type == Event::kNoteOnEvent) {
                         if (!std::isfinite(e.noteOn.velocity)) {
@@ -737,21 +785,30 @@ public:
                         m.bytes[2] = (uint8_t)std::lround(
                             (double)std::clamp(e.polyPressure.pressure,0.0f,1.0f) * 127.0);
                     } else if (e.type == Event::kDataEvent && e.data.bytes && e.data.size) {
-                        if (e.data.size > 4096) {
-                            inst->midi_queue_drops.fetch_add(1, std::memory_order_relaxed);
-                            malformed_or_saturated = true;
+                        const uint32 length = e.data.size;
+                        if (length > 4096 ||
+                            length > max_raw_bytes_per_callback - raw_bytes_examined) {
+                            bad_host_event();
                             continue;
                         }
+                        raw_bytes_examined += length;
                         const uint8_t status = e.data.bytes[0];
-                        uint32 length = e.data.size;
-                        if (status >= 0xf8 || status == 0xf6) length = 1;
-                        else if (status == 0xf1 || status == 0xf3 ||
-                                 (status >= 0xc0 && status < 0xe0)) length = 2;
-                        else if (status == 0xf2 ||
-                                 (status >= 0x80 && status < 0xc0) ||
-                                 (status >= 0xe0 && status < 0xf0)) length = 3;
-                        m.count = (uint16_t)std::min(length,e.data.size);
-                        m.raw = e.data.bytes;
+                        const bool valid = raw_packet_is_valid(e.data.bytes,length);
+                        if (!valid) {
+                            bad_host_event();
+                            // Release salvage for a two-byte truncated raw
+                            // NoteOff (status + pitch; absent velocity).
+                            // The exact channel and pitch must be retained.
+                            if ((status & 0xf0)==0x80 && length==2 &&
+                                e.data.bytes[1]<0x80) {
+                                m.bytes[0]=status; m.bytes[1]=e.data.bytes[1];
+                                m.bytes[2]=0;
+                                m.count=3;
+                            } else continue;
+                        } else {
+                            m.count=(uint16_t)length;
+                            m.raw=e.data.bytes;
+                        }
                         // Only register raw events which actually fit the
                         // callback scratch buffer; never mirror a discarded raw
                         // message by falsely suppressing a mapped controller.
@@ -805,6 +862,10 @@ public:
                     int32 offset=0;
                     ParamValue v=0;
                     if (queue->getPoint(p,offset,v)!=kResultOk) continue;
+                    if (offset<0 || offset>data.numSamples) {
+                        bad_host_event();
+                        continue;
+                    }
                     if (!std::isfinite(v)) {
                         // NaN/Inf normalized automation must never be fed
                         // to std::lround, then cast into a MIDI byte.
