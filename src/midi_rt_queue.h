@@ -72,15 +72,29 @@ public:
     bool recovery_pending() const noexcept {
         return recovering_.load(std::memory_order_acquire);
     }
-    // Feeder thread ONLY. Must run after draining the accepted queue.
-    bool finish_recovery_after_drain() noexcept {
+    // Worker/feeder ONLY. A readiness check must NOT rearm the RT producer:
+    // the original firmware must receive every CC123/CC120 FIRST. Releasing
+    // the producer at queue drain (rather than after the 32 commands) lets
+    // newly accepted NoteOn race ahead of the still-in-flight panic and be
+    // extinguished unexpectedly.
+    bool recovery_ready_after_drain() noexcept {
 #if defined(P007_TEST_EARLY_RECOVERY_MUTANT)
-        // Test-only historical bug: release voices before prior queued notes.
-        return recovering_.exchange(false, std::memory_order_acq_rel);
-#else
+        // Deliberate test-only historical fault: panic overtakes queued NoteOn.
+        return recovering_.load(std::memory_order_acquire);
+#elif defined(P007_TEST_PREMATURE_RECOVERY_RELEASE_MUTANT)
+        // Deliberate test-only historical fault: worker clears the fence
+        // immediately after drain, BEFORE sending CC123/CC120.
         if (!empty()) return false;
         return recovering_.exchange(false, std::memory_order_acq_rel);
+#else
+        return empty() && recovering_.load(std::memory_order_acquire);
 #endif
+    }
+    // Worker ONLY, called strictly AFTER the 16-channel CC123+CC120 delivery.
+    // Stays in fail-closed mode during every MIDI call made by the worker.
+    bool complete_recovery_after_panic() noexcept {
+        if (!empty() || !recovering_.load(std::memory_order_acquire)) return false;
+        return recovering_.exchange(false, std::memory_order_acq_rel);
     }
     void reset_after_stop() noexcept {
         read_.store(0, std::memory_order_relaxed);

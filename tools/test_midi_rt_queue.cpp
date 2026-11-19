@@ -50,16 +50,31 @@ int main() {
     for(int i=0;i<8;++i)
         if(!require(q.push(100,note,3),"overload fixture filled"))return 11;
     if(!require(!q.push(100,note,3) && q.recovery_pending(),"overflow requests recovery"))return 12;
-    if(!require(!q.finish_recovery_after_drain(),"recovery cannot overtake accepted notes"))return 14;
+    if(!require(!q.recovery_ready_after_drain(),"recovery cannot overtake accepted notes"))return 14;
     for(int i=0;i<8;++i) {
         if(i==4 && !require(!q.push(101,note,3),"no new voices during recovery"))return 15;
-        if(!require(!q.finish_recovery_after_drain(),"no early panic until ALL notes delivered"))return 14;
+        if(!require(!q.recovery_ready_after_drain(),"no early panic until ALL notes delivered"))return 14;
         if(!require(q.front()!=nullptr,"retained accepted note"))return 16;
         q.pop();
     }
-    if(!require(q.finish_recovery_after_drain(),"one recovery after backlog drained"))return 17;
+    if(!require(q.recovery_ready_after_drain(),"panic ready after backlog drained"))return 17;
+    // Critical new regression: ready != complete. The audio producer must
+    // remain fenced while the feeder sends all 32 panic commands. This
+    // detects the previous exchange(false) BEFORE any CC123/CC120 was sent.
+    if(!require(q.recovery_pending() && !q.push(102,note,3),
+                "panic must fence new notes until after CC120/123 delivered"))return 20;
+    for(int channel=0;channel<16;++channel) {
+        const uint8_t cc123[3]={(uint8_t)(0xb0|channel),123,0};
+        const uint8_t cc120[3]={(uint8_t)(0xb0|channel),120,0};
+        // Simulate exactly the two worker-only firmware calls per channel.
+        if(!require(cc123[1]==123 && cc120[1]==120,"complete channel panic"))return 21;
+        if(!require(q.recovery_pending() && !q.push(103,note,3),
+                    "producer closed throughout firmware panic"))return 20;
+    }
+    if(!require(q.complete_recovery_after_panic(),"rearm only after full panic delivery"))return 22;
     if(!require(!q.recovery_pending() && q.empty(),"recovery rearmed"))return 18;
-    if(!require(q.push(102,note,3),"new notes accepted after recovery"))return 19;
+    if(!require(q.push(104,note,3),"new notes accepted after recovery"))return 19;
+    if(!require(!q.recovery_ready_after_drain(),"only one panic per overload"))return 23;
     std::puts("P007_MIDI_OVERFLOW_RECOVERY_ORDER=PASS");
     return 0;
 }

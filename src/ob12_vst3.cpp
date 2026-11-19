@@ -180,7 +180,7 @@ struct Instrument {
                         engine->midi_deferred(message->bytes.data(), (int)message->length);
                         midi_queue.pop();
                     }
-                    if (midi_queue.finish_recovery_after_drain()) {
+                    if (midi_queue.recovery_ready_after_drain()) {
                         // All accepted MIDI must be handed to the original firmware
                         // BEFORE panic; otherwise notes dispatched after panic can stick.
                         // This worker-side diagnostic is not part of the RT callback.
@@ -196,6 +196,9 @@ struct Instrument {
                             engine->midi_deferred(off, 3);
                             engine->midi_deferred(sound_off, 3);
                         }
+                        // Reopen host ingress only once all 32 CC messages
+                        // were handed to the original firmware's input queue.
+                        midi_queue.complete_recovery_after_panic();
                     }
                     const int n = midi_queue.frames_before_next(current, 240 - generated);
                     if (n == 0) continue; // an event arrived at this exact boundary
