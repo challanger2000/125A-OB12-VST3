@@ -840,6 +840,12 @@ int main(int, char** argv) {
         processed=processed&&audio->process(data)==kResultOk;
         const int first=state_program(); // Timbre A 025 => 24.
         events.list.clear();changes.list.clear();
+        // Give the real firmware worker an actual 48-kHz window to consume
+        // this bank+program sequence before sending the next independent one.
+        for(int i=0;i<8;++i) {
+            processed=processed&&audio->process(data)==kResultOk;
+            Sleep(12);
+        }
         // Invert the values. Old mask drops the later mapped Program bank.
         push_raw(cc0_0,3,32);
         push_mapped(0,212,64);
@@ -848,6 +854,10 @@ int main(int, char** argv) {
         processed=processed&&audio->process(data)==kResultOk;
         const int second=state_program(); // Program A 026 => 281.
         events.list.clear();changes.list.clear();
+        for(int i=0;i<8;++i) {
+            processed=processed&&audio->process(data)==kResultOk;
+            Sleep(12);
+        }
         // Exact same-offset conflict remains raw-wins; this must not
         // invert the previous behavior under simultaneous host mirroring.
         push_raw(cc0_64,3,32);
@@ -857,9 +867,9 @@ int main(int, char** argv) {
         processed=processed&&audio->process(data)==kResultOk;
         const int simultaneous=state_program(); // Program A 025 => 280.
         events.list.clear();changes.list.clear();
-        for(int n=0;n<20;++n) {
+        for(int n=0;n<30;++n) {
             processed=processed&&audio->process(data)==kResultOk;
-            Sleep(4);
+            Sleep(8);
         }
         // Read the real NON-RT firmware worker log; show the two accepted
         // CC0 events per distinct-offset case, including their precise
@@ -868,14 +878,21 @@ int main(int, char** argv) {
         std::string line;
         struct Dispatch{unsigned long long frame=0;unsigned status=0,pitch=0,value=0;};
         std::vector<Dispatch> seen;
+        int missed_native_target=0;
+        std::vector<Dispatch> late_midi;
         while(std::getline(log,line)) {
             unsigned long long frame=0,actual=0;
             unsigned status=0,pitch=0,value=0;
             if(std::sscanf(line.c_str(),
                     "P007_DISPATCH target=%llu actual=%llu status=%u pitch=%u value=%u",
-                    &frame,&actual,&status,&pitch,&value)==5 &&
-                frame==actual)
-                seen.push_back({actual,status,pitch,value});
+                    &frame,&actual,&status,&pitch,&value)==5) {
+                if(frame==actual)seen.push_back({actual,status,pitch,value});
+                else {
+                    ++missed_native_target;
+                    if(late_midi.size()<10)
+                        late_midi.push_back({actual,status,pitch,value});
+                }
+            }
         }
         const int expected_delta=(int)(
             std::llround(212.0*48000.0/44100.0)-
@@ -919,6 +936,20 @@ int main(int, char** argv) {
         }
         const bool ok=processed&&first==24&&second==281&&simultaneous==280&&
                       first_trace&&second_trace&&same_trace;
+        if(!ok) {
+            std::printf("P007_MIDI_IDENTITY_DIAGNOSTIC exact_dispatches=%zu "
+                        "target_mismatches=%d\n",seen.size(),missed_native_target);
+            for(const auto& item:seen)
+                if((item.status==0xb0 && item.pitch==0) ||
+                    (item.status==0xc0 && (item.pitch==24 || item.pitch==25)))
+                    std::printf("P007_IDENTITY_SEQ exact frame=%llu status=%u "
+                                "pitch=%u value=%u\n",item.frame,item.status,
+                                item.pitch,item.value);
+            for(const auto& item:late_midi)
+                std::printf("P007_IDENTITY_SEQ late actual=%llu status=%u "
+                            "pitch=%u value=%u\n",item.frame,item.status,
+                            item.pitch,item.value);
+        }
         std::printf("P007_MIDI_PER_EVENT_CC_OFFSET_IDENTITY=%s "
                     "raw_then_mapped=%d expected=24 mapped_later=%d expected=281 "
                     "same_frame_raw_wins=%d expected=280 "
