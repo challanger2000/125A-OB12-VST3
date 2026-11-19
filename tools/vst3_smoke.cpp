@@ -15,6 +15,7 @@
 #include "pluginterfaces/base/ibstream.h"
 #include "pluginterfaces/gui/iplugview.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -635,6 +636,204 @@ int main(int, char** argv) {
     // Do not certify acoustic panic unless the ORIGINAL FIRMWARE's Pad
     // survived the matching no-command baseline and then became quieter.
     // Keep this diagnostic separate from the host-load/protocol gates.
+
+    // The timing-only 9-case test later in the host sends very short notes;
+    // those can legitimately render PCM=0 without proving a playable synth.
+    // Here the ORIGINAL currently audible factory Pad is retriggered as a
+    // sustained 4-note chord under each small buffer and rate. The pre-chord
+    // PCM is measured for diagnostics, NOT assumed silent: the original
+    // firmware, voices and effects are deliberately NOT reset by merely
+    // calling setProcessing(false), and 64 frames at 96 kHz are only 0.67 ms.
+    const bool sustained_small_audio_ok = [&]() -> bool {
+        struct Result {
+            int rate,block;
+            double control_rms=0,active_rms=0,p99_us=0,max_us=0;
+            int callbacks=0,misses=0,nonfinite=0,active_blocks=0;
+            int chord_ons=0,chord_offs=0;
+            bool ok=false;
+        };
+        std::vector<Result> results;
+        LARGE_INTEGER timing_freq{};
+        QueryPerformanceFrequency(&timing_freq);
+        const uint8_t all_sound_off[]={0xb0,120,0};
+        auto pace=[&](int rate,int frames) {
+            const DWORD millis=std::max<DWORD>(1,
+                (DWORD)std::ceil(1000.0*frames/rate));
+            Sleep(millis);
+        };
+        auto raw=[&](const uint8_t* bytes,uint32_t n) {
+            Event e{};
+            e.type=Event::kDataEvent;e.sampleOffset=0;
+            e.data.bytes=bytes;e.data.size=n;
+            events.list.push_back(e);
+        };
+        // Independent oracle: inspect the REAL feeder dispatch log to
+        // verify the new chord (and releases) reached original firmware.
+        // PCM liveness alone might otherwise be an old reverb/voice tail.
+        const int chord[]={60,64,67,72};
+        const auto dispatch_counts=[&](unsigned midi_status) {
+            std::array<int,4> counts{};
+            std::ifstream log(probe_path);
+            std::string line;
+            while(std::getline(log,line)) {
+                unsigned long long target=0,actual=0;
+                unsigned status=0,pitch=0,value=0;
+                if(std::sscanf(line.c_str(),
+                    "P007_DISPATCH target=%llu actual=%llu status=%u pitch=%u value=%u",
+                    &target,&actual,&status,&pitch,&value)!=5) continue;
+                if(status!=midi_status)continue;
+                for(int i=0;i<4;++i)
+                    if(pitch==(unsigned)chord[i])++counts[i];
+            }
+            return counts;
+        };
+        bool api=true;
+        for(int sample_rate : {44100,48000,96000}) {
+            for(int frames_per_block : {64,128,256}) {
+                Result result{};
+                result.rate=sample_rate;
+                result.block=frames_per_block;
+                const int deadline_us=(int)std::llround(
+                    1e6*frames_per_block/(double)sample_rate);
+                api=api && audio->setProcessing(false)==kResultOk &&
+                    component->setActive(false)==kResultOk;
+                ProcessSetup cfg{kRealtime,kSample32,512,(double)sample_rate};
+                api=api && audio->setupProcessing(cfg)==kResultOk &&
+                    component->setActive(true)==kResultOk &&
+                    audio->setProcessing(true)==kResultOk;
+                data.numSamples=frames_per_block;
+                events.list.clear();changes.list.clear();
+                // Remove all held pad voices. Measure real PCM remaining from
+                // the same patch before injecting the next chord.
+                raw(all_sound_off,3);
+                double control_sq=0;
+                uint64_t control_n=0;
+                for(int n=0;n<140 && api;++n) {
+                    api=api&&audio->process(data)==kResultOk;
+                    events.list.clear();
+                    if(n>=90)for(int i=0;i<frames_per_block;++i) {
+                        control_sq+=double(l[i])*l[i]+double(r[i])*r[i];
+                        control_n+=2;
+                    }
+                    pace(sample_rate,frames_per_block);
+                }
+                result.control_rms=control_n ? std::sqrt(control_sq/control_n) : -1;
+                // Original-firmware NoteOn chord, sustained throughout 260
+                // paced host callbacks; judge only the final 100 callbacks.
+                const auto ons_before=dispatch_counts(0x90);
+                for(int pitch:chord) {
+                    Event on{};
+                    on.type=Event::kNoteOnEvent;
+                    on.sampleOffset=3;
+                    on.noteOn.channel=0;
+                    on.noteOn.pitch=pitch;
+                    on.noteOn.velocity=0.8f;
+                    events.list.push_back(on);
+                }
+                std::vector<double> callback_us;
+                callback_us.reserve(260);
+                double active_sq=0;uint64_t active_n=0;
+                for(int n=0;n<260 && api;++n) {
+                    LARGE_INTEGER t0{},t1{};
+                    QueryPerformanceCounter(&t0);
+                    api=api&&audio->process(data)==kResultOk;
+                    QueryPerformanceCounter(&t1);
+                    const double duration=1e6*double(t1.QuadPart-t0.QuadPart)/
+                        double(timing_freq.QuadPart);
+                    callback_us.push_back(duration);
+                    if(duration > 1e6*frames_per_block/(double)sample_rate)
+                        ++result.misses;
+                    events.list.clear();
+                    if(n>=160) {
+                        double block_sq=0;
+                        for(int i=0;i<frames_per_block;++i) {
+                            if(!std::isfinite(l[i])||!std::isfinite(r[i])) {
+                                ++result.nonfinite;
+                                continue;
+                            }
+                            const double sample_sq=
+                                double(l[i])*l[i]+double(r[i])*r[i];
+                            active_sq+=sample_sq;active_n+=2;
+                            block_sq+=sample_sq;
+                        }
+                        if(block_sq>1e-10)++result.active_blocks;
+                    }
+                    pace(sample_rate,frames_per_block);
+                }
+                result.callbacks=(int)callback_us.size();
+                if(!callback_us.empty()) {
+                    std::sort(callback_us.begin(),callback_us.end());
+                    result.p99_us=callback_us[(size_t)
+                        (0.99*(callback_us.size()-1))];
+                    result.max_us=callback_us.back();
+                }
+                result.active_rms=active_n ?
+                    std::sqrt(active_sq/active_n) : -1;
+                // Explicit NoteOffs for all four voices are required:
+                // CC120 (All Sound Off) is not a guarantee of immediate
+                // silence from the hardware's voice and effect generators.
+                events.list.clear();
+                const auto offs_before=dispatch_counts(0x80);
+                for(int pitch:chord) {
+                    Event off{};off.type=Event::kNoteOffEvent;
+                    off.sampleOffset=0;off.noteOff.channel=0;
+                    off.noteOff.pitch=pitch;off.noteOff.velocity=0;
+                    events.list.push_back(off);
+                }
+                api=api&&audio->process(data)==kResultOk;
+                events.list.clear();
+                for(int drain=0;drain<30 && api;++drain) {
+                    api=api&&audio->process(data)==kResultOk;
+                    pace(sample_rate,frames_per_block);
+                }
+                const auto ons_after=dispatch_counts(0x90);
+                const auto offs_after=dispatch_counts(0x80);
+                for(int i=0;i<4;++i) {
+                    if(ons_after[i]>ons_before[i])++result.chord_ons;
+                    if(offs_after[i]>offs_before[i])++result.chord_offs;
+                }
+                // A strong new-chord-vs-silence contrast would be
+                // falsely demanded if earlier hardware FX tails remain.
+                // Audio liveness plus independently delivered 4 note pairs
+                // is the actual pragmatic host-stress contract.
+                result.ok=api && result.nonfinite==0 &&
+                    result.callbacks==260 && result.misses==0 &&
+                    result.active_blocks>=80 &&
+                    result.active_rms>1e-4 &&
+                    result.chord_ons==4 && result.chord_offs==4;
+                results.push_back(result);
+                std::printf("P007_SUSTAINED_NATIVE_AUDIO_CASE=%s rate=%d "
+                    "block=%d control_rms=%.7f active_rms=%.7f "
+                    "active_blocks=%d/100 callbacks=%d p99_us=%.1f "
+                    "max_us=%.1f misses=%d nonfinite=%d "
+                    "chord_ons=%d/4 chord_offs=%d/4 deadline_us=%d\n",
+                    result.ok?"PASS":"FAIL",sample_rate,frames_per_block,
+                    result.control_rms,result.active_rms,
+                    result.active_blocks,result.callbacks,result.p99_us,
+                    result.max_us,result.misses,result.nonfinite,
+                    result.chord_ons,result.chord_offs,deadline_us);
+                // Silence the four held voices; next case checks fresh input
+                // only against this independently measured silent control.
+                events.list.clear();raw(all_sound_off,3);
+                api=api&&audio->process(data)==kResultOk;
+                events.list.clear();
+            }
+        }
+        api=api && audio->setProcessing(false)==kResultOk &&
+            component->setActive(false)==kResultOk;
+        ProcessSetup restore{kRealtime,kSample32,512,44100};
+        api=api && audio->setupProcessing(restore)==kResultOk &&
+            component->setActive(true)==kResultOk &&
+            audio->setProcessing(true)==kResultOk;
+        data.numSamples=512;
+        events.list.clear();changes.list.clear();
+        bool passed=api&&results.size()==9;
+        for(const auto& x:results)passed=passed&&x.ok;
+        std::printf("P007_SUSTAINED_NATIVE_AUDIO_9X=%s cases=%zu "
+                    "reference=original-firmware-pad-chord\n",
+                    passed?"PASS":"FAIL",results.size());
+        return passed;
+    }();
 
     // First choose Timbre B-007 through the actual browser while the machine
     // is fully booted. Then ensure the exact selection is serialized/recalled.
@@ -1559,7 +1758,8 @@ int main(int, char** argv) {
     FreeLibrary(dll);
     SetEnvironmentVariableA("OB12_MIDI_PROBE", nullptr);
     const bool reload_ok = test_second_plugin_instance(argv[1]);
-    return audio_ok && preselect_browser_ok && state_ok && browser_ok &&
+    return audio_ok && sustained_small_audio_ok &&
+           preselect_browser_ok && state_ok && browser_ok &&
            deferred_frame_ok && firmware_ready && midi_bridge_ok && midi_mixed_raw_mapped_ok &&
            midi_controller_frame_identity_ok && timing_ok && latency_ok && recovery_ok &&
            small_block_ok && midi_nonfinite_host_values_ok &&
