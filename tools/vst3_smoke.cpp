@@ -462,6 +462,9 @@ int main(int, char** argv) {
     double block = 512 / 44100.0, next = 0, sum = 0, first_sound = -1;
     long frames = 0, zero_blocks = 0, blocks = 0;
     bool sent = false;
+    int64_t audio_frame_cursor = 0;
+    int64_t note_requested_frame = -1;
+    int64_t note_first_pcm_frame = -1;
     while (next < 17) {
         while (seconds() < next) Sleep(1);
         next += block;
@@ -475,9 +478,21 @@ int main(int, char** argv) {
             e.noteOn.pitch = 72;
             e.noteOn.velocity = 0.8f;
             events.list.push_back(e);
+            note_requested_frame = audio_frame_cursor;
             sent = true;
         }
         audio->process(data);
+        if (sent && note_first_pcm_frame < 0) {
+            for (int i=0; i<data.numSamples; ++i) {
+                // First meaningful PCM frame from the real firmware/audio
+                // chain; prior silence alone cannot be treated as a PDC oracle.
+                if (std::fabs(l[i]) > 1e-5f || std::fabs(r[i]) > 1e-5f) {
+                    note_first_pcm_frame = audio_frame_cursor + i;
+                    break;
+                }
+            }
+        }
+        audio_frame_cursor += data.numSamples;
         if (next > 12.5 && next < 16) for (float v : l) recording.push_back((int16_t)std::max(-32767.f, std::min(32767.f, v * 32767)));
         double s = 0;
         for (float v : l) s += v * v;
@@ -501,6 +516,59 @@ int main(int, char** argv) {
     }
     const bool audio_ok = first_sound > 10.0 && first_sound < 17.0 && frames > 0 && sum / frames > 1e-9;
     printf("AUDIO_TEST=%s\n", audio_ok ? "PASS" : "FAIL");
+    const int64_t pcm_onset_delta = note_first_pcm_frame >= 0 && note_requested_frame >= 0
+        ? note_first_pcm_frame - note_requested_frame : -1;
+    // Diagnostic for the ACTUAL stereo waveform. The reported scheduler PDC
+    // does not cover analog/firmware envelope response; do not label this
+    // as exact hardware equivalence or enforce an arbitrary onset tolerance.
+    std::printf("P007_PCM_ONSET_MEASURED requested_frame=%lld actual_frame=%lld delay_samples=%lld "
+                "reported_scheduler_latency=%u host_rate=44100 threshold=0.00001\n",
+                (long long)note_requested_frame,(long long)note_first_pcm_frame,
+                (long long)pcm_onset_delta,latency_at_44100);
+
+    // The original main smoke leaves the sustained Pad note on for six seconds.
+    // Measure the true firmware response to CC123+CC120, then a matching NoteOff
+    // positive control. Recording alone (not a preset label or MIDI log) decides
+    // whether the audio actually becomes quiet.
+    const auto release_pcm = [&](bool send_all_sound_off, bool send_note_off) -> double {
+        events.list.clear(); changes.list.clear();
+        const uint8_t cc123[3]={0xB0,123,0};
+        const uint8_t cc120[3]={0xB0,120,0};
+        if (send_all_sound_off) for (const auto* bytes : {cc123,cc120}) {
+            Event e{}; e.type=Event::kDataEvent; e.sampleOffset=0;
+            e.data.bytes=bytes; e.data.size=3; events.list.push_back(e);
+        }
+        if (send_note_off) {
+            Event off{}; off.type=Event::kNoteOffEvent;
+            off.noteOff.pitch=72; off.noteOff.channel=0; off.sampleOffset=0;
+            events.list.push_back(off);
+        }
+        double late_energy=0;
+        uint64_t late_samples=0;
+        for (int i=0;i<160;++i) {
+            if (audio->process(data)!=kResultOk) return -1;
+            // Exclude initial device polls, all effect tails and the known
+            // bridge lookahead. Compare the last 35 host blocks only.
+            if (i>=125) for(int n=0;n<data.numSamples;++n) {
+                late_energy += double(l[n])*l[n]+double(r[n])*r[n];
+                late_samples += 2;
+            }
+            events.list.clear();
+            Sleep(12); // paced 512/44100 host callback
+        }
+        return late_samples ? std::sqrt(late_energy/late_samples) : -1;
+    };
+    const double held_rms=std::sqrt(sum/frames); // left channel, 13..17s held reference
+    const double panic_tail_rms=release_pcm(true,false);
+    const double noteoff_tail_rms=release_pcm(false,true);
+    const bool release_probe_valid=audio_ok && held_rms>1e-4 &&
+        panic_tail_rms>=0 && noteoff_tail_rms>=0;
+    const bool panic_quiet=release_probe_valid && panic_tail_rms<held_rms*0.1;
+    std::printf("P007_PANIC_PCM_MEASURED=%s held_L_rms=%.8f panic_LR_late_rms=%.8f "
+                "noteoff_LR_late_rms=%.8f panic_below_-20dB=%d\n",
+                release_probe_valid?"MEASURED":"NOT_VALID",
+                held_rms,panic_tail_rms,noteoff_tail_rms,(int)panic_quiet);
+
     // First choose Timbre B-007 through the actual browser while the machine
     // is fully booted. Then ensure the exact selection is serialized/recalled.
     const bool preselect_browser_ok = test_scale(component, nullptr);
