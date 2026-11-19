@@ -372,7 +372,7 @@ int main(int, char** argv) {
     char temp[MAX_PATH];
     GetTempPathA(MAX_PATH, temp);
     SetEnvironmentVariableA("LOCALAPPDATA", temp);  // keep the user's saved size out of this
-    const std::string probe_path=std::string(temp)+"\\p007-midi-offsets.txt";
+    std::string probe_path=std::string(temp)+"\\p007-midi-offsets.txt";
     SetEnvironmentVariableA("OB12_MIDI_PROBE", probe_path.c_str());
     // Test discovery of an external matching soundbank pair without writing to firmware.
     std::string user_library = std::string(temp) + "\\OB12";
@@ -628,6 +628,37 @@ int main(int, char** argv) {
     printf("PROJECT_STATE_TEST=%s bytes=%zu\n", state_ok ? "PASS" : "FAIL", state.storage.size());
     const bool browser_ok = test_scale(component, &state);
     const bool deferred_frame_ok = test_studio_one_delayed_frame(component);
+
+    // The panel+project tests above use real setState(), which reboots the
+    // asynchronous original CPU. A fixed 16×Sleep(4) is not proof that the
+    // second firmware boot completed. Start a fresh, uniquely-named worker
+    // probe, reload the same owned state, then require an explicit original
+    // Engine::sounding_ready transition before timing/overload assertions.
+    // The new filename prevents a READY marker from an older feeder from
+    // making the new worker appear booted.
+    const bool firmware_ready = [&]() -> bool {
+        const std::string fresh=std::string(temp)+"\\p007-ready-current-boot.txt";
+        DeleteFileA(fresh.c_str());
+        SetEnvironmentVariableA("OB12_MIDI_PROBE", fresh.c_str());
+        state.pos=0;
+        if (component->setState(&state)!=kResultOk) {
+            puts("P007_FIRMWARE_READY_GATE=FAIL state reload");
+            return false;
+        }
+        probe_path=fresh;
+        for (int check=0; check<1500; ++check) {
+            std::ifstream file(probe_path);
+            std::string line;
+            while (std::getline(file,line))
+                if (line.find("P007_WORKER_READY native_frame=")!=std::string::npos) {
+                    std::printf("P007_FIRMWARE_READY_GATE=PASS polls=%d\n",check);
+                    return true;
+                }
+            Sleep(20);
+        }
+        puts("P007_FIRMWARE_READY_GATE=FAIL timeout after 30s");
+        return false;
+    }();
 
     // P007 independent host-boundary regression: a single raw channel event may
     // suppress the host's mirrored parameter mapping in THAT block, but never
@@ -954,5 +985,5 @@ int main(int, char** argv) {
     SetEnvironmentVariableA("OB12_MIDI_PROBE", nullptr);
     const bool reload_ok = test_second_plugin_instance(argv[1]);
     return audio_ok && preselect_browser_ok && state_ok && browser_ok &&
-           deferred_frame_ok && midi_bridge_ok && timing_ok && latency_ok && recovery_ok && small_block_ok && reload_ok ? 0 : 2;
+           deferred_frame_ok && firmware_ready && midi_bridge_ok && timing_ok && latency_ok && recovery_ok && small_block_ok && reload_ok ? 0 : 2;
 }

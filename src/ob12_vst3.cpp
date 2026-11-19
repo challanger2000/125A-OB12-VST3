@@ -125,6 +125,7 @@ struct Instrument {
     void start_feeder(int preset) {
         feeder = std::thread([this, preset]() {
             bool preset_restored = false;
+            bool ready_probed = false;
             std::vector<int32_t> block(240 * 2);
             // Diagnostics are deliberately owned by this NON-realtime worker.
             FILE* dispatch_probe = nullptr;
@@ -134,6 +135,17 @@ struct Instrument {
                 const uint64_t fill = written.load(std::memory_order_relaxed) -
                                       read.load(std::memory_order_acquire);
                 const bool ready = engine->sounding_ready();
+                // A diagnostic-only authoritative ready signal, issued on the
+                // original firmware worker rather than guessed from fixed Sleep.
+                // The log is opened only when OB12_MIDI_PROBE is opted into.
+                if (ready && !ready_probed) {
+                    if (dispatch_probe) {
+                        fprintf(dispatch_probe,"P007_WORKER_READY native_frame=%llu\n",
+                                (unsigned long long)written.load(std::memory_order_relaxed));
+                        fflush(dispatch_probe);
+                    }
+                    ready_probed=true;
+                }
                 if (ready && !preset_restored && preset >= 0 && preset < 512) {
                     // Saved project recall is subordinate to a newer MIDI Program
                     // Change, including when it arrived while firmware booted.
