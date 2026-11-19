@@ -1473,7 +1473,7 @@ int main(int, char** argv) {
         zero.noteOn.pitch=123;zero.noteOn.channel=0;zero.noteOn.velocity=0.0f;
         Event quiet_on{};
         quiet_on.type=Event::kNoteOnEvent;quiet_on.sampleOffset=144;
-        quiet_on.noteOn.pitch=124;quiet_on.channel=0;quiet_on.noteOn.velocity=0.00001f;
+        quiet_on.noteOn.pitch=124;quiet_on.noteOn.channel=0;quiet_on.noteOn.velocity=0.00001f;
         Event off{};
         off.type=Event::kNoteOffEvent;off.sampleOffset=320;
         off.noteOff.pitch=124;off.noteOff.channel=0;off.noteOff.velocity=0;
