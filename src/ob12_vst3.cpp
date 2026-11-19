@@ -129,8 +129,15 @@ struct Instrument {
             std::vector<int32_t> block(240 * 2);
             // Diagnostics are deliberately owned by this NON-realtime worker.
             FILE* dispatch_probe = nullptr;
-            if (const char* file = getenv("OB12_MIDI_PROBE"))
-                dispatch_probe = fopen(file, "w");
+            // Query the *live Win32 process environment*. C/C++ getenv() can
+            // read a stale UCRT environment snapshot after a host calls
+            // SetEnvironmentVariableA between plugin reloads. Never run this
+            // diagnostic lookup or file I/O on the audio callback.
+            char probe_file[MAX_PATH] = {};
+            const DWORD probe_size =
+                GetEnvironmentVariableA("OB12_MIDI_PROBE", probe_file, MAX_PATH);
+            if (probe_size > 0 && probe_size < MAX_PATH)
+                dispatch_probe = fopen(probe_file, "w");
             while (!stop.load(std::memory_order_acquire)) {
                 const uint64_t fill = written.load(std::memory_order_relaxed) -
                                       read.load(std::memory_order_acquire);

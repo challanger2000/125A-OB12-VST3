@@ -639,7 +639,13 @@ int main(int, char** argv) {
     const bool firmware_ready = [&]() -> bool {
         const std::string fresh=std::string(temp)+"\\p007-ready-current-boot.txt";
         DeleteFileA(fresh.c_str());
-        SetEnvironmentVariableA("OB12_MIDI_PROBE", fresh.c_str());
+        const bool exported=SetEnvironmentVariableA("OB12_MIDI_PROBE",fresh.c_str())!=0;
+        char observed[MAX_PATH]={};
+        const DWORD reported=GetEnvironmentVariableA("OB12_MIDI_PROBE",observed,MAX_PATH);
+        if (!exported || reported!=fresh.size() || fresh!=observed) {
+            puts("P007_FIRMWARE_READY_GATE=FAIL fresh probe env not installed");
+            return false;
+        }
         state.pos=0;
         if (component->setState(&state)!=kResultOk) {
             puts("P007_FIRMWARE_READY_GATE=FAIL state reload");
