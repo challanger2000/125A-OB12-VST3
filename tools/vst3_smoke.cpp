@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <vector>
 using namespace Steinberg;
 using namespace Steinberg::Vst;
@@ -1197,6 +1198,102 @@ int main(int, char** argv) {
         return valid;
     }();
 
+
+    // Host normalization adversary: NaN / Infinity must never flow through
+    // lround/float-to-int into valid-looking bank changes or audible notes.
+    // High but finite values must be clamped before multiplying.
+    const bool midi_nonfinite_host_values_ok=[&]() -> bool {
+        auto selected=[&]() -> int {
+            MemoryState image;
+            if(component->getState(&image)!=kResultOk ||
+               image.storage.size()!=0x100000+24) return -100;
+            int32_t value=-100;
+            std::memcpy(&value,image.storage.data()+20,sizeof value);
+            return value;
+        };
+        auto raw=[&](const uint8_t* bytes,uint32_t n,int off=0) {
+            Event event{};event.type=Event::kDataEvent;
+            event.sampleOffset=off;event.data.bytes=bytes;event.data.size=n;
+            events.list.push_back(event);
+        };
+        const uint8_t bank64[]={0xB0,0,64};
+        const uint8_t bank0[]={0xB0,32,0};
+        const uint8_t program22[]={0xC0,22},program23[]={0xC0,23};
+        const uint8_t program24[]={0xC0,24},program25[]={0xC0,25};
+        auto submit_program=[&](const uint8_t* prog,
+                                bool bad_mapped,double bad_value) -> bool {
+            events.list.clear();changes.list.clear();
+            raw(prog,2,256);
+            if(bad_mapped) {
+                Queue bad{};
+                bad.id=0;bad.value=bad_value;bad.sample_offset=0;
+                changes.list.push_back(bad);
+            }
+            const bool ok=audio->process(data)==kResultOk;
+            events.list.clear();changes.list.clear();
+            // Let original firmware apply queued/panic input between cases.
+            for(int i=0;i<20;++i) {
+                if(audio->process(data)!=kResultOk)return false;
+                Sleep(4);
+            }
+            return ok;
+        };
+        events.list.clear();changes.list.clear();
+        raw(bank64,3);raw(bank0,3);raw(program22,2,256);
+        bool calls=audio->process(data)==kResultOk;
+        events.list.clear();
+        for(int i=0;i<20;++i){calls=calls&&audio->process(data)==kResultOk;Sleep(4);}
+        const int start=selected();
+        calls=calls&&submit_program(program23,true,
+            std::numeric_limits<double>::quiet_NaN());
+        const int nan_state=selected();
+        calls=calls&&submit_program(program24,true,
+            std::numeric_limits<double>::infinity());
+        const int inf_state=selected();
+        calls=calls&&submit_program(program25,true,1e100);
+        const int bounded_state=selected();
+
+        // Invalid NoteOn is rejected, but a subsequent valid NoteOn and a
+        // NoteOff with NaN release velocity still reach original firmware.
+        Event invalid{};
+        invalid.type=Event::kNoteOnEvent;invalid.sampleOffset=10;
+        invalid.noteOn.pitch=119;
+        invalid.noteOn.velocity=std::numeric_limits<float>::quiet_NaN();
+        Event legitimate{};
+        legitimate.type=Event::kNoteOnEvent;legitimate.sampleOffset=20;
+        legitimate.noteOn.pitch=120;legitimate.noteOn.velocity=0.75f;
+        Event malformed_off{};
+        malformed_off.type=Event::kNoteOffEvent;
+        malformed_off.sampleOffset=300;malformed_off.noteOff.pitch=120;
+        malformed_off.noteOff.velocity=std::numeric_limits<float>::quiet_NaN();
+        events.list={invalid,legitimate,malformed_off};
+        changes.list.clear();
+        calls=calls&&audio->process(data)==kResultOk;
+        events.list.clear();
+        for(int i=0;i<30;++i) {calls=calls&&audio->process(data)==kResultOk;Sleep(4);}
+        std::ifstream trace(probe_path);
+        std::string line;
+        bool invalid_note_dispatched=false,valid_note=false,valid_off=false;
+        while(std::getline(trace,line)) {
+            unsigned long long target=0,actual=0;
+            unsigned status=0,pitch=0;
+            if(std::sscanf(line.c_str(),
+                "P007_DISPATCH target=%llu actual=%llu status=%u pitch=%u",
+                &target,&actual,&status,&pitch)!=4)continue;
+            if(status==144 && pitch==119)invalid_note_dispatched=true;
+            if(status==144 && pitch==120)valid_note=true;
+            if(status==128 && pitch==120)valid_off=true;
+        }
+        const bool ok=calls && start==278 && nan_state==279 &&
+            inf_state==280 && bounded_state==281 &&
+            !invalid_note_dispatched && valid_note && valid_off;
+        std::printf("P007_HOST_NONFINITE_MIDI_VALUES=%s "
+            "baseline=%d nan=%d inf=%d huge_finite=%d "
+            "invalid_on_dispatched=%d valid_on=%d invalid_vel_off_delivered=%d\n",
+            ok?"PASS":"FAIL",start,nan_state,inf_state,bounded_state,
+            (int)invalid_note_dispatched,(int)valid_note,(int)valid_off);
+        return ok;
+    }();
     // Adversarial host iterator budget: the VST3 callback must finish even
     // if a malicious/buggy IEventList / IParameterChanges reports INT_MAX
     // events. The returned pointers are a real host fixture, while the
@@ -1255,5 +1352,6 @@ int main(int, char** argv) {
     return audio_ok && preselect_browser_ok && state_ok && browser_ok &&
            deferred_frame_ok && firmware_ready && midi_bridge_ok && midi_mixed_raw_mapped_ok &&
            midi_controller_frame_identity_ok && timing_ok && latency_ok && recovery_ok &&
-           small_block_ok && midi_unbounded_host_count_ok && reload_ok ? 0 : 2;
+           small_block_ok && midi_nonfinite_host_values_ok &&
+           midi_unbounded_host_count_ok && reload_ok ? 0 : 2;
 }

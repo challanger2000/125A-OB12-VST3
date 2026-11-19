@@ -700,17 +700,42 @@ public:
                     m.offset = e.sampleOffset;
                     m.order = order++;
                     if (e.type == Event::kNoteOnEvent) {
+                        if (!std::isfinite(e.noteOn.velocity)) {
+                            // Avoid implementation-defined lround(NaN/Inf)
+                            // and do not invent a playable velocity for a
+                            // malformed host NoteOn.
+                            inst->midi_queue_drops.fetch_add(1, std::memory_order_relaxed);
+                            malformed_or_saturated = true;
+                            continue;
+                        }
                         m.bytes[0] = 0x90 | (e.noteOn.channel & 15);
                         m.bytes[1] = (uint8_t)std::clamp<int>(e.noteOn.pitch, 0, 127);
-                        m.bytes[2] = (uint8_t)std::max(1, (int)std::lround(e.noteOn.velocity * 127));
+                        m.bytes[2] = (uint8_t)std::max(1, (int)std::lround(
+                            (double)std::clamp(e.noteOn.velocity,0.0f,1.0f) * 127.0));
                     } else if (e.type == Event::kNoteOffEvent) {
                         m.bytes[0] = 0x80 | (e.noteOff.channel & 15);
                         m.bytes[1] = (uint8_t)std::clamp<int>(e.noteOff.pitch, 0, 127);
-                        m.bytes[2] = (uint8_t)std::clamp<int>((int)std::lround(e.noteOff.velocity * 127),0,127);
+                        // Even with invalid release velocity, keep NoteOff
+                        // delivery so the original firmware can free voices.
+                        // A malformed value also requests fail-closed recovery.
+                        if (!std::isfinite(e.noteOff.velocity)) {
+                            inst->midi_queue_drops.fetch_add(1, std::memory_order_relaxed);
+                            malformed_or_saturated = true;
+                            m.bytes[2] = 0;
+                        } else {
+                            m.bytes[2] = (uint8_t)std::lround(
+                                (double)std::clamp(e.noteOff.velocity,0.0f,1.0f) * 127.0);
+                        }
                     } else if (e.type == Event::kPolyPressureEvent) {
+                        if (!std::isfinite(e.polyPressure.pressure)) {
+                            inst->midi_queue_drops.fetch_add(1, std::memory_order_relaxed);
+                            malformed_or_saturated = true;
+                            continue;
+                        }
                         m.bytes[0] = 0xA0 | (e.polyPressure.channel & 15);
                         m.bytes[1] = (uint8_t)std::clamp<int>(e.polyPressure.pitch, 0, 127);
-                        m.bytes[2] = (uint8_t)std::clamp<int>((int)std::lround(e.polyPressure.pressure * 127), 0, 127);
+                        m.bytes[2] = (uint8_t)std::lround(
+                            (double)std::clamp(e.polyPressure.pressure,0.0f,1.0f) * 127.0);
                     } else if (e.type == Event::kDataEvent && e.data.bytes && e.data.size) {
                         if (e.data.size > 4096) {
                             inst->midi_queue_drops.fetch_add(1, std::memory_order_relaxed);
@@ -780,6 +805,14 @@ public:
                     int32 offset=0;
                     ParamValue v=0;
                     if (queue->getPoint(p,offset,v)!=kResultOk) continue;
+                    if (!std::isfinite(v)) {
+                        // NaN/Inf normalized automation must never be fed
+                        // to std::lround, then cast into a MIDI byte.
+                        inst->midi_queue_drops.fetch_add(1, std::memory_order_relaxed);
+                        malformed_or_saturated = true;
+                        continue;
+                    }
+                    v = std::clamp(v,0.0,1.0);
                     // Check the *particular mapped point*, not every event
                     // with this controller number. Different offsets must
                     // survive, even when the controller ID and value match.
