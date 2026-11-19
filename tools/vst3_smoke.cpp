@@ -713,6 +713,68 @@ int main(int, char** argv) {
                     ok ? "PASS" : "FAIL", (int)before, (int)after);
         return ok;
     }();
+
+    // Critical mixed-source host path: raw channel Program Change must NOT
+    // silence unrelated mapped bank-select CC in the same audio callback.
+    // A second fixture verifies that raw CC values win over true mirrored
+    // mappings for those exact controller IDs (no duplicate applied).
+    const bool midi_mixed_raw_mapped_ok = [&]() -> bool {
+        auto state_preset=[&]() -> int {
+            MemoryState image;
+            if (component->getState(&image)!=kResultOk ||
+                image.storage.size()!=0x100000+24) return -100;
+            int32_t value=-100;
+            std::memcpy(&value,image.storage.data()+20,sizeof value);
+            return value;
+        };
+        auto raw_at=[&](const uint8_t* bytes,uint32_t size,int offset) {
+            Event event{};
+            event.type=Event::kDataEvent;
+            event.sampleOffset=offset;
+            event.data.bytes=bytes;
+            event.data.size=size;
+            events.list.push_back(event);
+        };
+        auto mapped_cc=[&](int id,double value) {
+            Queue queue{};
+            queue.id=(ParamID)id;
+            queue.value=value;
+            changes.list.push_back(queue);
+        };
+        // Establish unambiguous Timbre-A bank baseline.
+        events.list.clear();changes.list.clear();
+        mapped_cc(0,0.0); mapped_cc(32,0.0);
+        bool calls=audio->process(data)==kResultOk;
+        events.list.clear();changes.list.clear();
+        // Bank MSB at host sample 0, raw Program at sample 64:
+        // this MUST select Program A-006 = 256 + 5.
+        const uint8_t program5[]={0xc0,0x05};
+        raw_at(program5,2,64);
+        mapped_cc(0,64.0/127.0);
+        mapped_cc(32,0.0);
+        calls=calls && audio->process(data)==kResultOk;
+        const int mixed_selected=state_preset();
+        events.list.clear();changes.list.clear();
+        // Raw bank CCs and their mirrored mapped CCs must NOT compete.
+        // If the zero-valued mapped MSB were applied, this would
+        // incorrectly select Timbre B-010 (137) instead of Program A-010 (265).
+        const uint8_t bank64[]={0xb0,0,64};
+        const uint8_t bank0[]={0xb0,32,0};
+        const uint8_t program9[]={0xc0,9};
+        raw_at(bank64,3,0);
+        raw_at(bank0,3,0);
+        raw_at(program9,2,64);
+        mapped_cc(0,0.0);
+        mapped_cc(32,1.0);
+        calls=calls && audio->process(data)==kResultOk;
+        const int duplicate_selected=state_preset();
+        events.list.clear();changes.list.clear();
+        const bool result=calls && mixed_selected==261 && duplicate_selected==265;
+        std::printf("P007_MIDI_MIXED_RAW_AND_MAPPED=%s "
+                    "mixed_selected=%d expected=261 mirrored_selected=%d expected=265\n",
+                    result?"PASS":"FAIL",mixed_selected,duplicate_selected);
+        return result;
+    }();
     // A separate timed native MIDI ingress probe follows the ordinary VST3
     // project and browser tests; it checks the true feeder's 48-kHz dispatch.
     const bool timing_ok = [&]() -> bool {
@@ -991,5 +1053,6 @@ int main(int, char** argv) {
     SetEnvironmentVariableA("OB12_MIDI_PROBE", nullptr);
     const bool reload_ok = test_second_plugin_instance(argv[1]);
     return audio_ok && preselect_browser_ok && state_ok && browser_ok &&
-           deferred_frame_ok && firmware_ready && midi_bridge_ok && timing_ok && latency_ok && recovery_ok && small_block_ok && reload_ok ? 0 : 2;
+           deferred_frame_ok && firmware_ready && midi_bridge_ok && midi_mixed_raw_mapped_ok &&
+           timing_ok && latency_ok && recovery_ok && small_block_ok && reload_ok ? 0 : 2;
 }

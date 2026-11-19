@@ -660,7 +660,11 @@ public:
             };
             std::array<Message,2048> list{};
             int used = 0, order = 0;
-            bool raw_channel_messages = false;
+            // A host can provide raw Program Change AND mapped controllers
+            // in the same callback. Suppress only the mapped CC/pressure/bend
+            // controller that is ALSO present as raw channel-0 MIDI; never
+            // discard unrelated mapping because a raw Program Change arrived.
+            std::array<bool,midi_params> mapped_ids_present_as_raw{};
             bool malformed_or_saturated = false;
             auto add = [&](const Message& message) {
                 if (used >= (int)list.size()) {
@@ -704,18 +708,28 @@ public:
                                  (status >= 0xe0 && status < 0xf0)) length = 3;
                         m.count = (uint16_t)std::min(length,e.data.size);
                         m.raw = e.data.bytes;
-                        if (status >= 0x80 && status < 0xf0) raw_channel_messages = true;
+                        // IMidiMapping in this VST3 targets the MIDI channel-0
+                        // input bus. Deduplicate corresponding raw channel-0
+                        // controller IDs, not all MIDI parameters globally.
+                        if ((status & 0xf0) == 0xb0 && (status & 0x0f) == 0 &&
+                            m.count >= 3 && e.data.bytes[1] < 128)
+                            mapped_ids_present_as_raw[e.data.bytes[1]] = true;
+                        else if (status == 0xd0 && m.count >= 2)
+                            mapped_ids_present_as_raw[kAfterTouch] = true;
+                        else if (status == 0xe0 && m.count >= 3)
+                            mapped_ids_present_as_raw[kPitchBend] = true;
                     } else continue;
                     add(m);
                 }
             }
-            // Only suppress mirrored controller mapping inside the same host callback.
-            IParameterChanges* changes = raw_channel_messages ? nullptr : data.inputParameterChanges;
+            // A raw Program Change is NOT a mirrored mapped CC.
+            IParameterChanges* changes = data.inputParameterChanges;
             if (changes) for (int32 i=0; i<changes->getParameterCount(); ++i) {
                 IParamValueQueue* queue = changes->getParameterData(i);
                 if (!queue) continue;
                 const ParamID id = queue->getParameterId();
-                if (id >= (ParamID)midi_params) continue;
+                if (id >= (ParamID)midi_params ||
+                    mapped_ids_present_as_raw[id]) continue;
                 for (int32 p=0; p<queue->getPointCount(); ++p) {
                     int32 offset=0;
                     ParamValue v=0;
