@@ -169,11 +169,12 @@ struct Instrument {
                         if (message->frame > current) break;
                         if (dispatch_probe) {
                             fprintf(dispatch_probe,
-                                    "P007_DISPATCH target=%llu actual=%llu status=%u pitch=%u\n",
+                                    "P007_DISPATCH target=%llu actual=%llu status=%u pitch=%u value=%u\n",
                                     (unsigned long long)message->frame,
                                     (unsigned long long)current,
                                     (unsigned)message->bytes[0],
-                                    (unsigned)(message->length > 1 ? message->bytes[1] : 0));
+                                    (unsigned)(message->length > 1 ? message->bytes[1] : 0),
+                                    (unsigned)(message->length > 2 ? message->bytes[2] : 0));
                             fflush(dispatch_probe);
                         }
                         engine->midi_deferred(message->bytes.data(), (int)message->length);
@@ -660,11 +661,20 @@ public:
             };
             std::array<Message,2048> list{};
             int used = 0, order = 0;
-            // A host can provide raw Program Change AND mapped controllers
-            // in the same callback. Suppress only the mapped CC/pressure/bend
-            // controller that is ALSO present as raw channel-0 MIDI; never
-            // discard unrelated mapping because a raw Program Change arrived.
-            std::array<bool,midi_params> mapped_ids_present_as_raw{};
+            // Exact-frame raw/mapped collision keys: (controller ID, VST3 sample
+            // offset). Never remove a distinct automation point merely because
+            // a raw event for that CC appeared elsewhere in the same block.
+            // If both sources claim one ID at the SAME sample, raw MIDI wins
+            // even if their quantized values conflict: there is no host-provided
+            // provenance to disambiguate mirrored versus independent input.
+            // Fixed stack scratch, sorted and binary-searched; no RT heap/locks.
+            std::array<uint64_t,2048> raw_controller_keys{};
+            int raw_controller_count = 0;
+            auto controller_key = [&](uint32 id, int32 offset) noexcept {
+                const uint32 at = (uint32)std::clamp<int32>(
+                    offset, 0, std::max<int32>(0,data.numSamples));
+                return (uint64_t(id) << 32) | uint64_t(at);
+            };
             bool malformed_or_saturated = false;
             auto add = [&](const Message& message) {
                 if (used >= (int)list.size()) {
@@ -708,32 +718,45 @@ public:
                                  (status >= 0xe0 && status < 0xf0)) length = 3;
                         m.count = (uint16_t)std::min(length,e.data.size);
                         m.raw = e.data.bytes;
-                        // IMidiMapping in this VST3 targets the MIDI channel-0
-                        // input bus. Deduplicate corresponding raw channel-0
-                        // controller IDs, not all MIDI parameters globally.
+                        // Only register raw events which actually fit the
+                        // callback scratch buffer; never mirror a discarded raw
+                        // message by falsely suppressing a mapped controller.
+                        int raw_controller_id = -1;
                         if ((status & 0xf0) == 0xb0 && (status & 0x0f) == 0 &&
                             m.count >= 3 && e.data.bytes[1] < 128)
-                            mapped_ids_present_as_raw[e.data.bytes[1]] = true;
+                            raw_controller_id = e.data.bytes[1];
                         else if (status == 0xd0 && m.count >= 2)
-                            mapped_ids_present_as_raw[kAfterTouch] = true;
+                            raw_controller_id = kAfterTouch;
                         else if (status == 0xe0 && m.count >= 3)
-                            mapped_ids_present_as_raw[kPitchBend] = true;
+                            raw_controller_id = kPitchBend;
+                        if (raw_controller_id >= 0 &&
+                            used < (int)list.size() &&
+                            raw_controller_count < (int)raw_controller_keys.size())
+                            raw_controller_keys[raw_controller_count++] =
+                                controller_key((uint32)raw_controller_id,m.offset);
                     } else continue;
                     add(m);
                 }
             }
+            std::sort(raw_controller_keys.begin(),
+                      raw_controller_keys.begin()+raw_controller_count);
             // A raw Program Change is NOT a mirrored mapped CC.
             IParameterChanges* changes = data.inputParameterChanges;
             if (changes) for (int32 i=0; i<changes->getParameterCount(); ++i) {
                 IParamValueQueue* queue = changes->getParameterData(i);
                 if (!queue) continue;
                 const ParamID id = queue->getParameterId();
-                if (id >= (ParamID)midi_params ||
-                    mapped_ids_present_as_raw[id]) continue;
+                if (id >= (ParamID)midi_params) continue;
                 for (int32 p=0; p<queue->getPointCount(); ++p) {
                     int32 offset=0;
                     ParamValue v=0;
                     if (queue->getPoint(p,offset,v)!=kResultOk) continue;
+                    // Check the *particular mapped point*, not every event
+                    // with this controller number. Different offsets must
+                    // survive, even when the controller ID and value match.
+                    if (std::binary_search(raw_controller_keys.begin(),
+                            raw_controller_keys.begin()+raw_controller_count,
+                            controller_key(id,offset))) continue;
                     Message m{};
                     m.offset=offset; m.order=order++;
                     if (id==kPitchBend) {

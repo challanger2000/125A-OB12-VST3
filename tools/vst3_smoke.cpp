@@ -73,12 +73,13 @@ struct Events final : IEventList {
 struct Queue final : IParamValueQueue {
     ParamID id = 0;
     ParamValue value = 0;
+    int32 sample_offset = 0;
     tresult PLUGIN_API queryInterface(const TUID, void** obj) override { *obj = nullptr; return kNoInterface; }
     uint32 PLUGIN_API addRef() override { return 1; }
     uint32 PLUGIN_API release() override { return 1; }
     ParamID PLUGIN_API getParameterId() override { return id; }
     int32 PLUGIN_API getPointCount() override { return 1; }
-    tresult PLUGIN_API getPoint(int32, int32& offset, ParamValue& v) override { offset = 0; v = value; return kResultOk; }
+    tresult PLUGIN_API getPoint(int32, int32& offset, ParamValue& v) override { offset = sample_offset; v = value; return kResultOk; }
     tresult PLUGIN_API addPoint(int32, ParamValue, int32&) override { return kResultFalse; }
 };
 struct Changes final : IParameterChanges {
@@ -775,6 +776,133 @@ int main(int, char** argv) {
                     result?"PASS":"FAIL",mixed_selected,duplicate_selected);
         return result;
     }();
+
+    // Same CC ID != duplicate unless the exact host-frame offset also
+    // collides. This is a full loaded-VST3 counterexample to the previous
+    // block-wide "same controller present" suppression.
+    const bool midi_controller_frame_identity_ok = [&]() -> bool {
+        auto state_program=[&]() -> int {
+            MemoryState image;
+            if (component->getState(&image)!=kResultOk ||
+                image.storage.size()!=0x100000+24) return -100;
+            int32_t selected=-100;
+            std::memcpy(&selected,image.storage.data()+20,sizeof selected);
+            return selected;
+        };
+        auto push_raw=[&](const uint8_t* bytes,uint32_t count,int offset) {
+            Event e{};e.type=Event::kDataEvent;e.sampleOffset=offset;
+            e.data.bytes=bytes;e.data.size=count;events.list.push_back(e);
+        };
+        auto push_mapped=[&](int controller,int offset,int value) {
+            Queue point{};
+            point.id=(ParamID)controller;
+            point.sample_offset=offset;
+            point.value=(double)value/127.0;
+            changes.list.push_back(point);
+        };
+        const uint8_t cc0_64[]={0xB0,0x00,0x40};
+        const uint8_t cc0_0[]={0xB0,0x00,0x00};
+        const uint8_t cc32_0[]={0xB0,0x20,0x00};
+        const uint8_t program24[]={0xC0,0x18};
+        const uint8_t program25[]={0xC0,0x19};
+        bool processed=true;
+        events.list.clear();changes.list.clear();
+        // Raw Program-bank at t32; later mapped Timbre-bank at t212.
+        // The old block-wide CC-ID mask incorrectly DROPPED mapped t212.
+        push_raw(cc0_64,3,32);
+        push_mapped(0,212,0);
+        push_raw(cc32_0,3,0);
+        push_raw(program24,2,300);
+        processed=processed&&audio->process(data)==kResultOk;
+        const int first=state_program(); // Timbre A 025 => 24.
+        events.list.clear();changes.list.clear();
+        // Invert the values. Old mask drops the later mapped Program bank.
+        push_raw(cc0_0,3,32);
+        push_mapped(0,212,64);
+        push_raw(cc32_0,3,0);
+        push_raw(program25,2,300);
+        processed=processed&&audio->process(data)==kResultOk;
+        const int second=state_program(); // Program A 026 => 281.
+        events.list.clear();changes.list.clear();
+        // Exact same-offset conflict remains raw-wins; this must not
+        // invert the previous behavior under simultaneous host mirroring.
+        push_raw(cc0_64,3,32);
+        push_mapped(0,32,0);
+        push_raw(cc32_0,3,0);
+        push_raw(program24,2,300);
+        processed=processed&&audio->process(data)==kResultOk;
+        const int simultaneous=state_program(); // Program A 025 => 280.
+        events.list.clear();changes.list.clear();
+        for(int n=0;n<20;++n) {
+            processed=processed&&audio->process(data)==kResultOk;
+            Sleep(4);
+        }
+        // Read the real NON-RT firmware worker log; show the two accepted
+        // CC0 events per distinct-offset case, including their precise
+        // original 48-kHz dispatch delta, not merely the state mirror.
+        std::ifstream log(probe_path);
+        std::string line;
+        struct Dispatch{unsigned long long frame=0;unsigned status=0,pitch=0,value=0;};
+        std::vector<Dispatch> seen;
+        while(std::getline(log,line)) {
+            unsigned long long frame=0,actual=0;
+            unsigned status=0,pitch=0,value=0;
+            if(std::sscanf(line.c_str(),
+                    "P007_DISPATCH target=%llu actual=%llu status=%u pitch=%u value=%u",
+                    &frame,&actual,&status,&pitch,&value)==5 &&
+                frame==actual)
+                seen.push_back({actual,status,pitch,value});
+        }
+        const int expected_delta=(int)(
+            std::llround(212.0*48000.0/44100.0)-
+            std::llround(32.0*48000.0/44100.0));
+        // Each unique Program Change ends the associated controller case.
+        // Two distinct raw CC0+mapped CC0 must precede Program24/25,
+        // while an exact same-frame clash contributes one CC0.
+        bool first_trace=false,second_trace=false,same_trace=false;
+        int case_number=0;
+        std::vector<Dispatch> cc0;
+        for(const auto& x:seen) {
+            if(x.status==0xB0 && x.pitch==0) cc0.push_back(x);
+            if(x.status!=0xC0)continue;
+            if(x.pitch==24 && case_number==0) {
+                // First Program24 may appear in other earlier tests; take
+                // only cases with our exact ordered distinct CC0 signatures.
+                if(cc0.size()>=2) {
+                    const auto& a=cc0[cc0.size()-2];
+                    const auto& z=cc0.back();
+                    if(a.value==64 && z.value==0 &&
+                       (long long)(z.frame-a.frame)==expected_delta) {
+                        first_trace=true;case_number=1;cc0.clear();continue;
+                    }
+                }
+            }
+            if(x.pitch==25 && case_number==1) {
+                if(cc0.size()>=2) {
+                    const auto& a=cc0[cc0.size()-2];
+                    const auto& z=cc0.back();
+                    if(a.value==0 && z.value==64 &&
+                       (long long)(z.frame-a.frame)==expected_delta) {
+                        second_trace=true;case_number=2;cc0.clear();continue;
+                    }
+                }
+            }
+            if(x.pitch==24 && case_number==2) {
+                if(cc0.size()==1 && cc0.back().value==64) {
+                    same_trace=true;case_number=3;cc0.clear();continue;
+                }
+            }
+        }
+        const bool ok=processed&&first==24&&second==281&&simultaneous==280&&
+                      first_trace&&second_trace&&same_trace;
+        std::printf("P007_MIDI_PER_EVENT_CC_OFFSET_IDENTITY=%s "
+                    "raw_then_mapped=%d expected=24 mapped_later=%d expected=281 "
+                    "same_frame_raw_wins=%d expected=280 "
+                    "native_traces=%d/%d/%d expected_delta=%d\n",
+                    ok?"PASS":"FAIL",first,second,simultaneous,
+                    (int)first_trace,(int)second_trace,(int)same_trace,expected_delta);
+        return ok;
+    }();
     // A separate timed native MIDI ingress probe follows the ordinary VST3
     // project and browser tests; it checks the true feeder's 48-kHz dispatch.
     const bool timing_ok = [&]() -> bool {
@@ -1054,5 +1182,6 @@ int main(int, char** argv) {
     const bool reload_ok = test_second_plugin_instance(argv[1]);
     return audio_ok && preselect_browser_ok && state_ok && browser_ok &&
            deferred_frame_ok && firmware_ready && midi_bridge_ok && midi_mixed_raw_mapped_ok &&
-           timing_ok && latency_ok && recovery_ok && small_block_ok && reload_ok ? 0 : 2;
+           midi_controller_frame_identity_ok && timing_ok && latency_ok && recovery_ok &&
+           small_block_ok && reload_ok ? 0 : 2;
 }
