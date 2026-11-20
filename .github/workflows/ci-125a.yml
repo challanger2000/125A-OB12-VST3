@@ -172,6 +172,9 @@ jobs:
           $root = 'build/125A-OB12-VST3-FULL'
           New-Item -ItemType Directory -Force -Path $root | Out-Null
           Copy-Item -LiteralPath 'build/OB12.vst3' -Destination "$root/OB12.vst3" -Recurse -Force
+          # MSVC .lib/.exp linker products are not part of a VST3 installation.
+          Remove-Item "$root/OB12.vst3/Contents/x86_64-win/OB12.lib" -ErrorAction SilentlyContinue
+          Remove-Item "$root/OB12.vst3/Contents/x86_64-win/OB12.exp" -ErrorAction SilentlyContinue
           $bundle = "$root/OB12.vst3/Contents/x86_64-win"
           $rom = "$bundle/rom"
           foreach ($required in @(
@@ -197,7 +200,7 @@ jobs:
           Copy-Item LICENSE "$root/LICENSE-GPL-3.0.txt" -Force
           @'
           125A OB-12 VST3 — Complete Windows x64 installation for personal use
-          Tested code: 71da5b0dd4fce7c66fe5e140b4828ae82f721ce9
+          Tested source provenance: see SOURCE-AND-BUILD.txt (exact run SHA)
           Original synthesizer firmware/data copyright Viscount International.
           Firmware comes from the upstream Tuth/ob12-emu v0.10.0 release for
           personal/archival use. No commercial redistribution authorized here.
@@ -223,14 +226,18 @@ jobs:
           '@ | Set-Content "$root/INSTALL-125A.txt" -Encoding utf8
           @'
           125A modified VST3 plugin source:
-          https://github.com/challanger2000/125A-OB12-VST3/tree/71da5b0dd4fce7c66fe5e140b4828ae82f721ce9
+          https://github.com/challanger2000/125A-OB12-VST3
 
           Upstream original:
           https://github.com/Tuth/ob12-emu/tree/v0.10.0
 
           Build and original firmware verification:
-          https://github.com/challanger2000/125A-OB12-VST3/actions/runs/44452636537
+          Windows CI run: exact URL appended below
           '@ | Set-Content "$root/SOURCE-AND-BUILD.txt" -Encoding utf8
+          # Never pin a previous binary/test's SHA in a new full artifact.
+          Add-Content "$root/INSTALL-125A.txt" "Exact source SHA: $env:GITHUB_SHA" -Encoding utf8
+          Add-Content "$root/SOURCE-AND-BUILD.txt" "Exact source SHA: $env:GITHUB_SHA" -Encoding utf8
+          Add-Content "$root/SOURCE-AND-BUILD.txt" "CI: https://github.com/challanger2000/125A-OB12-VST3/actions/runs/$env:GITHUB_RUN_ID" -Encoding utf8
           $all = @(Get-ChildItem $root -Recurse -File)
           Write-Host "P007_FULL_INSTALL_READY=PASS bundle_files=$($all.Count) total_bytes=$(($all | Measure-Object Length -Sum).Sum)"
       - name: Publish complete Windows VST3 for personal evaluation
