@@ -397,12 +397,57 @@ static bool test_studio_one_delayed_frame(IComponent* component) {
 int main(int, char** argv) {
     char temp[MAX_PATH];
     GetTempPathA(MAX_PATH, temp);
-    SetEnvironmentVariableA("LOCALAPPDATA", temp);  // keep the user's saved size out of this
+    // Set both the process Win32 and UCRT environment, because the
+    // plugin uses getenv("LOCALAPPDATA") during Instrument::start().
+    // SetEnvironmentVariableA alone can leave the CRT snapshot stale.
+    SetEnvironmentVariableA("LOCALAPPDATA", temp);
+    _putenv_s("LOCALAPPDATA", temp);
+    if (!getenv("LOCALAPPDATA") ||
+        std::string(getenv("LOCALAPPDATA")) != temp) {
+        puts("P007_LEGACY_FLASH_PROFILE_SETUP=FAIL UCRT environment");
+        return 1;
+    }
     std::string probe_path=std::string(temp)+"\\p007-midi-offsets.txt";
     SetEnvironmentVariableA("OB12_MIDI_PROBE", probe_path.c_str());
     // Test discovery of an external matching soundbank pair without writing to firmware.
     std::string user_library = std::string(temp) + "\\OB12";
     CreateDirectoryA(user_library.c_str(), nullptr);
+    // Reproduce the REAL customer crash: a valid pre-existing legacy flash
+    // file triggers Engine::load_flash() AFTER Master::go_lean() has cached
+    // its raw ROM pointer. The former vector::swap(staged) invalidated that
+    // pointer and crashed all three Studio Pro dumps at OB12+0x5101A.
+    // Use the unchanged real 16-KiB boot sector, so the bank is legitimate
+    // and the sound engine is not distorted by this regression fixture.
+    {
+        const std::string binary(argv[1]);
+        const size_t slash=binary.find_last_of("\\/");
+        if(slash==std::string::npos) {
+            puts("P007_LEGACY_FLASH_PROFILE_SETUP=FAIL DLL path");
+            return 1;
+        }
+        const std::string boot_path=binary.substr(0,slash) +
+            "\\rom\\boot_152-emergency-boot.bin";
+        std::ifstream boot(boot_path,std::ios::binary);
+        std::vector<char> bytes(0x4000);
+        if(!boot.read(bytes.data(),(std::streamsize)bytes.size()) ||
+            boot.get()!=std::char_traits<char>::eof()) {
+            puts("P007_LEGACY_FLASH_PROFILE_SETUP=FAIL original boot sector");
+            return 1;
+        }
+        const uint32_t start=0xfc000, length=(uint32_t)bytes.size();
+        const std::string legacy=std::string(temp)+"\\OB12\\flash.bin";
+        std::ofstream f(legacy,std::ios::binary|std::ios::trunc);
+        f.write("OB12FLSH",8);
+        f.write(reinterpret_cast<const char*>(&start),4);
+        f.write(reinterpret_cast<const char*>(&length),4);
+        f.write(bytes.data(),(std::streamsize)bytes.size());
+        f.close();
+        if(!f) {
+            puts("P007_LEGACY_FLASH_PROFILE_SETUP=FAIL writing flash.bin");
+            return 1;
+        }
+        puts("P007_LEGACY_FLASH_PROFILE_SETUP=PASS valid 16KiB legacy boot sector");
+    }
     user_library += "\\SoundBanks";
     CreateDirectoryA(user_library.c_str(), nullptr);
     { std::ofstream(user_library + "\\12prgTT.mid", std::ios::binary).put('X'); }
@@ -560,6 +605,10 @@ int main(int, char** argv) {
     }
     const bool audio_ok = first_sound > 10.0 && first_sound < 17.0 && frames > 0 && sum / frames > 1e-9;
     printf("AUDIO_TEST=%s\n", audio_ok ? "PASS" : "FAIL");
+    // This is no longer the green-field-only CI case. A legitimate persisted
+    // legacy flash was installed BEFORE plugin boot, proving firmware audio
+    // still works after the fast ROM window has been initialized.
+    std::printf("P007_LEGACY_FLASH_REAL_HOST_AUDIO=%s\n",audio_ok?"PASS":"FAIL");
     std::sort(audio_callback_us.begin(), audio_callback_us.end());
     const auto percentile_us=[&](double p) -> double {
         if (audio_callback_us.empty()) return -1;

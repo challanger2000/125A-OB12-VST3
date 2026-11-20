@@ -282,7 +282,17 @@ struct Engine::Impl {
             std::fill(seen.begin() + start, seen.begin() + start + size, 1);
             found = true;
         }
-        if (found) m->flash.swap(staged);
+        if (found) {
+            // The Master CPU has already called go_lean(), which installs
+            // read_window[0].data = flash.data() as a direct 1-MiB ROM
+            // mapping. swap() frees the ORIGINAL backing allocation when
+            // staged is destroyed, leaving a dangling CPU instruction
+            // pointer. A legacy %LOCALAPPDATA%/OB12/flash.bin then crashes
+            // the real Studio Pro host on the next CPU fetch (0xFFC012).
+            // Commit only fully validated sectors IN PLACE. Size is checked
+            // against the live 1-MiB vector before this copy.
+            std::copy(staged.begin(), staged.end(), m->flash.begin());
+        }
     }
     void save_flash() {
         if (flash_path.empty()) return;
@@ -573,7 +583,10 @@ void Engine::set_flash_file(const std::string& path) {
 bool Engine::restore_flash(const std::vector<uint8_t>& bytes) {
     Impl& e = *impl;
     if (bytes.size() != e.m->flash.size() || e.k != 0) return false;
-    e.m->flash = bytes;
+    // Fast Master address_space ROM windows were installed by go_lean().
+    // Preserve flash.data() just as for legacy-flash imports: vector
+    // assignment is not a portable guarantee of pointer stability.
+    std::copy(bytes.begin(), bytes.end(), e.m->flash.begin());
     // The host project owns this image. Never leak it to the per-user shared flash file.
     e.flash_path.clear();
     // A restored user image must never replace the immutable factory-reset baseline.
