@@ -441,6 +441,16 @@ int main(int, char** argv) {
         f.write(reinterpret_cast<const char*>(&start),4);
         f.write(reinterpret_cast<const char*>(&length),4);
         f.write(bytes.data(),(std::streamsize)bytes.size());
+        // A marked, otherwise blank flash sector proves this particular
+        // legacy image was loaded through the plugin's actual startup path.
+        // 0x90000 is outside the original ~344-KiB CPU firmware, factory
+        // presets, system parameters and boot sectors.
+        const uint32_t marker_start=0x90000, marker_length=0x10000;
+        std::vector<char> blank(marker_length,char(0xff));
+        blank[0]=char(0x5a);
+        f.write(reinterpret_cast<const char*>(&marker_start),4);
+        f.write(reinterpret_cast<const char*>(&marker_length),4);
+        f.write(blank.data(),(std::streamsize)blank.size());
         f.close();
         if(!f) {
             puts("P007_LEGACY_FLASH_PROFILE_SETUP=FAIL writing flash.bin");
@@ -890,6 +900,11 @@ int main(int, char** argv) {
     MemoryState state;
     const tresult state_result = component->getState(&state);
     bool state_ok = state_result == kResultOk && state.storage.size() == 0x100000 + 24;
+    const bool legacy_flash_loaded = state_ok &&
+        (uint8_t)state.storage[24 + 0x90000] == 0x5a;
+    std::printf("P007_LEGACY_FLASH_ACTUALLY_LOADED=%s marker_at_0x90000=%d\n",
+        legacy_flash_loaded?"PASS":"FAIL",(int)legacy_flash_loaded);
+    state_ok = state_ok && legacy_flash_loaded;
     int32_t captured_program = -1;
     if (state_ok) memcpy(&captured_program, state.storage.data() + 20, sizeof captured_program);
     state_ok = state_ok && captured_program == 134; // Timbre B-007, index 128+6
